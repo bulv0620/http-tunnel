@@ -1,0 +1,17 @@
+services:
+  http-tunnel-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        APP: server
+    container_name: http-tunnel-server
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 12400
+    ports:
+      - "12400:12400"
+      # Add every server mapping port you create in the client UI.
+      # Example:
+      # - "2234:2234"

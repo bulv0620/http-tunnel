@@ -1,0 +1,16 @@
+{
+  "name": "@http-tunnel/client",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@http-tunnel/shared": "^0.2.0",
+    "better-sqlite3": "^12.11.1",
+    "ws": "^8.18.0"
+  }
+}

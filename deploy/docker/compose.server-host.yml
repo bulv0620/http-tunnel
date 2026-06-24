@@ -1,0 +1,13 @@
+services:
+  http-tunnel-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        APP: server
+    container_name: http-tunnel-server
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      HOST: 0.0.0.0
+      PORT: 12400

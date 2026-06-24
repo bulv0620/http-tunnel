@@ -1,0 +1,20 @@
+{
+  "name": "@http-tunnel/shared",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./auth": "./src/auth.js",
+    "./audit": "./src/audit.js",
+    "./base-url": "./src/base-url.js",
+    "./cors": "./src/cors.js",
+    "./env-file": "./src/env-file.js",
+    "./http-utils": "./src/http-utils.js",
+    "./logger": "./src/logger.js",
+    "./mappings": "./src/mappings.js",
+    "./password": "./src/password.js",
+    "./static-web": "./src/static-web.js",
+    "./stream-protocol": "./src/stream-protocol.js",
+    "./validators": "./src/validators.js"
+  }
+}

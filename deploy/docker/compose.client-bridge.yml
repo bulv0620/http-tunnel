@@ -1,0 +1,16 @@
+services:
+  http-tunnel-client:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        APP: client
+    container_name: http-tunnel-client
+    restart: unless-stopped
+    environment:
+      ADMIN_HOST: 0.0.0.0
+      ADMIN_PORT: 12500
+    ports:
+      - "12500:12500"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

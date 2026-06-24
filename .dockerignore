@@ -1,0 +1,12 @@
+node_modules
+apps/web/dist
+apps/*/db
+apps/*/config
+config
+.git
+.gitignore
+.env.*
+npm-debug.log*
+Dockerfile
+docker-compose*.yml
+deploy

@@ -1,0 +1,7 @@
+node_modules/
+apps/web/dist/
+config/
+apps/*/config/
+apps/*/db/*.sqlite
+apps/*/db/*.sqlite-*
+npm-debug.log*

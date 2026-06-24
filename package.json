@@ -1,0 +1,35 @@
+{
+  "name": "http-tunnel",
+  "version": "0.2.0",
+  "private": true,
+  "description": "HTTP reverse tunnel monorepo with separate web, server, and client apps.",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev -w apps/web",
+    "dev:server": "npm run dev -w apps/server",
+    "dev:client": "npm run dev -w apps/client",
+    "server": "npm run start -w apps/server",
+    "client": "npm run start -w apps/client",
+    "build:web": "npm run build -w apps/web",
+    "docker:server": "docker compose -f deploy/docker/compose.server-host.yml up -d --build",
+    "docker:server:host": "docker compose -f deploy/docker/compose.server-host.yml up -d --build",
+    "docker:server:bridge": "docker compose -f deploy/docker/compose.server-bridge.yml up -d --build",
+    "docker:client:host": "docker compose -f deploy/docker/compose.client-host.yml up -d --build",
+    "docker:client:bridge": "docker compose -f deploy/docker/compose.client-bridge.yml up -d --build",
+    "pm2:start": "pm2 start ecosystem.config.cjs --update-env",
+    "pm2:server": "pm2 start ecosystem.config.cjs --only http-tunnel-server --update-env",
+    "pm2:client": "pm2 start ecosystem.config.cjs --only http-tunnel-client --update-env",
+    "pm2:restart": "pm2 restart ecosystem.config.cjs --update-env",
+    "pm2:stop": "pm2 stop ecosystem.config.cjs",
+    "pm2:delete": "pm2 delete ecosystem.config.cjs",
+    "pm2:logs": "pm2 logs",
+    "start": "npm run server"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
