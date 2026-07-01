@@ -34,7 +34,7 @@ import { applyAuth, dashboardRoute, state } from "../store.js";
 const router = useRouter();
 const error = ref("");
 const loading = ref(false);
-const form = reactive({ username: "admin", password: "" });
+const form = reactive({ username: "", password: "" });
 
 async function login() {
   if (loading.value) return;
