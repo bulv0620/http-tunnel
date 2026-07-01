@@ -10,7 +10,7 @@
         <el-button class="locale-button" :aria-label="t('app.language')" :icon="Connection" text @click="toggleLocale">{{ currentLanguageLabel }}</el-button>
         <div class="nav-actions">
           <el-button :class="{ active: isDashboard }" :icon="DataLine" text @click="router.push(dashboardRoute())">{{ t("app.dashboard") }}</el-button>
-          <el-button :class="{ active: isConfig }" :icon="Setting" text @click="router.push(configRoute())">{{ t("app.config") }}</el-button>
+          <el-button :class="{ active: isConfig }" style="margin-left: 0;" :icon="Setting" text @click="router.push(configRoute())">{{ t("app.config") }}</el-button>
         </div>
         <el-dropdown trigger="click">
           <div class="avatar">{{ adminInitial }}</div>
