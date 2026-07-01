@@ -88,6 +88,14 @@ function jumpToBase(baseUrl) {
   window.location.href = `${normalized}/#/${props.mode}/config`;
 }
 
+function reloadConfigPage(baseUrl) {
+  if (baseUrl) {
+    jumpToBase(baseUrl);
+    return;
+  }
+  window.location.reload();
+}
+
 async function loadConfig() {
   const data = await api.config();
   applyConfig(data.config);
@@ -101,7 +109,7 @@ async function save() {
     setApiBase(data.config.baseUrl);
     await refreshSetup();
     ElMessage.success(t("config.saved"));
-    if (data.redirectBaseUrl) jumpToBase(data.redirectBaseUrl);
+    setTimeout(() => reloadConfigPage(data.redirectBaseUrl), 150);
   } catch (err) {
     error.value = err.message || t("config.saveFailed");
   }

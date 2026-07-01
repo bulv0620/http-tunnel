@@ -1,4 +1,5 @@
 let apiBase = "";
+let unauthorizedHandler = null;
 
 function envOrigin() {
   const raw = import.meta.env.DEV ? import.meta.env.VITE_API_BASE : "";
@@ -19,6 +20,10 @@ export function setApiBase(baseUrl = "/") {
 
 export function currentBaseUrl() {
   return apiBase || "/";
+}
+
+export function onUnauthorized(handler) {
+  unauthorizedHandler = handler;
 }
 
 function target(path, options = {}) {
@@ -47,6 +52,9 @@ async function request(path, options = {}) {
   if (!response.ok) {
     const error = new Error(data.error || "request failed");
     error.status = response.status;
+    if (response.status === 401 && !options.skipUnauthorizedHandler) {
+      unauthorizedHandler?.(error);
+    }
     throw error;
   }
   return data;
@@ -56,8 +64,8 @@ export const api = {
   setupStatus: () => request("/api/setup/status", { root: true }),
   setup: (payload) => request("/api/setup", { method: "POST", body: JSON.stringify(payload), root: true }),
   app: () => request("/api/app"),
-  login: (payload) => request("/api/auth/login", { method: "POST", body: JSON.stringify(payload) }),
-  logout: () => request("/api/auth/logout", { method: "POST", body: "{}" }),
+  login: (payload) => request("/api/auth/login", { method: "POST", body: JSON.stringify(payload), skipUnauthorizedHandler: true }),
+  logout: () => request("/api/auth/logout", { method: "POST", body: "{}", skipUnauthorizedHandler: true }),
   me: () => request("/api/auth/me"),
   status: () => request("/api/status"),
   config: () => request("/api/config"),

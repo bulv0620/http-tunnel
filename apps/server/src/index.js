@@ -1,7 +1,7 @@
 import http from "node:http";
 import { WebSocketServer } from "ws";
 import { loadEnvFile } from "@http-tunnel/shared/env-file";
-import { createLoginRateLimiter, ensureAdmin, requireAuth, login, logout, currentUser } from "@http-tunnel/shared/auth";
+import { clearSessions, createLoginRateLimiter, ensureAdmin, requireAuth, login, logout, currentUser } from "@http-tunnel/shared/auth";
 import { clientIp, redact } from "@http-tunnel/shared/audit";
 import { stripBaseUrl } from "@http-tunnel/shared/base-url";
 import { applyCors } from "@http-tunnel/shared/cors";
@@ -299,6 +299,7 @@ function closeClient(code, reason) {
 function applySavedSettings(next) {
   const wasConfigured = isConfigured(config);
   const previousBaseUrl = config.baseUrl;
+  const previousAdminUser = config.adminUser;
   const previousTunnelToken = config.tunnelToken;
   Object.assign(config, listenConfig, next);
   ensureAdmin(config);
@@ -306,7 +307,8 @@ function applySavedSettings(next) {
     closeClient(4003, "server tunnel token changed");
   }
   return {
-    redirectBaseUrl: previousBaseUrl !== config.baseUrl ? config.baseUrl : ""
+    redirectBaseUrl: previousBaseUrl !== config.baseUrl ? config.baseUrl : "",
+    adminUserChanged: previousAdminUser !== config.adminUser
   };
 }
 
@@ -336,6 +338,8 @@ async function setup(req, res) {
 async function updateConfig(req, res) {
   try {
     const body = await readJson(req, config.maxBodyBytes);
+    const actor = currentUser(req, config) || "";
+    const shouldClearSessions = Boolean(body.adminPassword);
     const result = applySavedSettings(saveSettings({
       baseUrl: body.baseUrl || config.baseUrl,
       adminUser: body.adminUser || config.adminUser,
@@ -344,8 +348,9 @@ async function updateConfig(req, res) {
       requestTimeoutMs: body.requestTimeoutMs,
       maxBodyBytes: body.maxBodyBytes
     }));
+    if (shouldClearSessions || result.adminUserChanged) clearSessions();
     logger.info("server config updated", { baseUrl: config.baseUrl });
-    addAuditLog("server_config_updated", { actor: currentUser(req, config) || "", ip: clientIp(req), data: { baseUrl: config.baseUrl, tunnelToken: redact(config.tunnelToken) } });
+    addAuditLog("server_config_updated", { actor, ip: clientIp(req), data: { baseUrl: config.baseUrl, tunnelToken: redact(config.tunnelToken) } });
     json(res, 200, { ok: true, config: publicConfig(), ...result });
   } catch (error) {
     json(res, 400, { ok: false, error: error.message });

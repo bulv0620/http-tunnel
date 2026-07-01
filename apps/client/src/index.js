@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { WebSocket } from "ws";
 import { loadEnvFile } from "@http-tunnel/shared/env-file";
-import { ensureAdmin, requireAuth, login, logout, currentUser } from "@http-tunnel/shared/auth";
+import { clearSessions, ensureAdmin, requireAuth, login, logout, currentUser } from "@http-tunnel/shared/auth";
 import { stripBaseUrl } from "@http-tunnel/shared/base-url";
 import { applyCors } from "@http-tunnel/shared/cors";
 import {
@@ -100,6 +100,7 @@ function reloadMappings() {
 
 function applySavedSettings(next) {
   const previousBaseUrl = config.baseUrl;
+  const previousAdminUser = config.adminUser;
   const previousConnection = JSON.stringify({
     serverUrl: config.serverUrl,
     tunnelToken: config.tunnelToken,
@@ -116,7 +117,8 @@ function applySavedSettings(next) {
   });
   if (previousConnection !== currentConnection && connectorStarted) restartConnection();
   return {
-    redirectBaseUrl: previousBaseUrl !== config.baseUrl ? config.baseUrl : ""
+    redirectBaseUrl: previousBaseUrl !== config.baseUrl ? config.baseUrl : "",
+    adminUserChanged: previousAdminUser !== config.adminUser
   };
 }
 
@@ -149,6 +151,7 @@ async function setup(req, res) {
 async function updateConfig(req, res) {
   try {
     const body = await readJson(req, config.maxResponseBytes);
+    const shouldClearSessions = Boolean(body.adminPassword);
     const result = applySavedSettings(saveSettings({
       baseUrl: body.baseUrl || config.baseUrl,
       adminUser: body.adminUser || config.adminUser,
@@ -160,6 +163,7 @@ async function updateConfig(req, res) {
       requestTimeoutMs: body.requestTimeoutMs,
       maxResponseBytes: body.maxResponseBytes
     }));
+    if (shouldClearSessions || result.adminUserChanged) clearSessions();
     logger.info("client config updated", { baseUrl: config.baseUrl, clientId: config.clientId });
     json(res, 200, { ok: true, config: publicConfig(), ...result });
   } catch (error) {

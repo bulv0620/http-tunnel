@@ -102,3 +102,7 @@ export function logout(req, res) {
   });
   res.end(JSON.stringify({ ok: true }));
 }
+
+export function clearSessions() {
+  sessions.clear();
+}
