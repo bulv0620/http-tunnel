@@ -4,18 +4,18 @@
       <template #header>
         <div>
           <h1>HTTP Tunnel</h1>
-          <div class="subtitle">管理员登录</div>
+          <div class="subtitle">{{ t("auth.adminLogin") }}</div>
         </div>
       </template>
       <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="block-gap" />
       <el-form label-position="top" @submit.prevent="login">
-        <el-form-item label="账号">
+        <el-form-item :label="t('auth.username')">
           <el-input v-model="form.username" autocomplete="username" />
         </el-form-item>
-        <el-form-item label="密码">
+        <el-form-item :label="t('auth.password')">
           <el-input v-model="form.password" type="password" autocomplete="current-password" show-password />
         </el-form-item>
-        <el-button type="primary" class="full-button" @click="login">登录</el-button>
+        <el-button type="primary" class="full-button" @click="login">{{ t("auth.login") }}</el-button>
       </el-form>
     </el-card>
   </main>
@@ -25,6 +25,7 @@
 import { reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../api/client.js";
+import { t } from "../i18n.js";
 import { applyAuth, dashboardRoute, state } from "../store.js";
 
 const router = useRouter();
@@ -38,7 +39,7 @@ async function login() {
     applyAuth({ username: form.username });
     router.push(dashboardRoute());
   } catch (err) {
-    error.value = err.status === 401 ? "账号或密码不正确" : err.message || "登录失败";
+    error.value = err.status === 401 ? t("auth.invalidCredentials") : err.message || t("auth.loginFailed");
     if (!state.configured) router.push("/setup");
   }
 }

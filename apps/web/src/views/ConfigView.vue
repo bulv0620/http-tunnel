@@ -1,43 +1,43 @@
 <template>
-  <AppShell :title="title" subtitle="配置保存到本地 SQLite，基础路径变更后会自动跳转。">
+  <AppShell :title="title" :subtitle="t('config.subtitle')">
     <section class="panel">
-      <div class="panel-head"><h2>基础配置</h2></div>
+      <div class="panel-head"><h2>{{ t("config.basic") }}</h2></div>
       <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="block-gap" />
       <el-form label-position="top">
         <div class="form-grid">
-          <el-form-item label="基础路径">
+          <el-form-item :label="t('config.baseUrl')">
             <el-input v-model="form.baseUrl" placeholder="/" />
           </el-form-item>
-          <el-form-item label="管理员账号">
+          <el-form-item :label="t('config.adminUser')">
             <el-input v-model="form.adminUser" />
           </el-form-item>
-          <el-form-item label="管理员密码">
+          <el-form-item :label="t('config.adminPassword')">
             <el-input v-model="form.adminPassword" type="password" show-password />
           </el-form-item>
-          <el-form-item label="Tunnel Token">
+          <el-form-item :label="t('config.tunnelToken')">
             <el-input v-model="form.tunnelToken" show-password />
           </el-form-item>
 
           <template v-if="mode === 'client'">
-            <el-form-item label="服务端 WebSocket 地址" class="span-2">
+            <el-form-item :label="t('config.serverUrl')" class="span-2">
               <el-input v-model="form.serverUrl" />
             </el-form-item>
-            <el-form-item label="客户端 ID">
+            <el-form-item :label="t('config.clientId')">
               <el-input v-model="form.clientId" />
             </el-form-item>
-            <el-form-item label="重连间隔 ms">
+            <el-form-item :label="t('config.reconnectMs')">
               <el-input-number v-model="form.reconnectMs" :min="500" class="full-input" />
             </el-form-item>
           </template>
 
-          <el-form-item label="请求超时 ms">
+          <el-form-item :label="t('config.requestTimeoutMs')">
             <el-input-number v-model="form.requestTimeoutMs" :min="1000" class="full-input" />
           </el-form-item>
-          <el-form-item label="管理 API 请求体上限">
+          <el-form-item :label="t('config.maxBodyBytes')">
             <el-input-number v-model="sizeValue" :min="1024" class="full-input" />
           </el-form-item>
         </div>
-        <el-button type="primary" @click="save">保存配置</el-button>
+        <el-button type="primary" @click="save">{{ t("config.save") }}</el-button>
       </el-form>
     </section>
   </AppShell>
@@ -48,6 +48,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import AppShell from "./AppShell.vue";
 import { api, setApiBase } from "../api/client.js";
+import { t } from "../i18n.js";
 import { refreshSetup } from "../store.js";
 
 const props = defineProps({
@@ -68,7 +69,7 @@ const form = reactive({
   maxResponseBytes: 65536
 });
 
-const title = computed(() => (props.mode === "server" ? "服务端配置" : "客户端配置"));
+const title = computed(() => (props.mode === "server" ? t("config.serverTitle") : t("config.clientTitle")));
 const sizeValue = computed({
   get: () => (props.mode === "client" ? form.maxResponseBytes : form.maxBodyBytes),
   set: (value) => {
@@ -99,10 +100,10 @@ async function save() {
     applyConfig(data.config);
     setApiBase(data.config.baseUrl);
     await refreshSetup();
-    ElMessage.success("配置已保存");
+    ElMessage.success(t("config.saved"));
     if (data.redirectBaseUrl) jumpToBase(data.redirectBaseUrl);
   } catch (err) {
-    error.value = err.message || "配置保存失败";
+    error.value = err.message || t("config.saveFailed");
   }
 }
 

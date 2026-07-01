@@ -2,142 +2,211 @@
   <AppShell :title="title" :subtitle="subtitle">
     <section class="metric-grid">
       <div class="metric-card">
-        <div class="metric-label">{{ mode === "server" ? "客户端连接" : "服务端连接" }}</div>
+        <div class="metric-label">{{ mode === "server" ? t("dashboard.clientConnection") : t("dashboard.serverConnection") }}</div>
         <div class="metric-value">
-          <el-tag :type="mainConnected ? 'success' : 'danger'" effect="plain">{{ mainConnected ? "已连接" : "未连接" }}</el-tag>
+          <span class="connection-badge" :class="{ online: mainConnected }">
+            <span></span>{{ mainConnected ? t("dashboard.connected") : t("dashboard.disconnected") }}
+          </span>
         </div>
       </div>
       <div class="metric-card">
-        <div class="metric-label">{{ mode === "server" ? "客户端" : "客户端 ID" }}</div>
+        <div class="metric-label">{{ mode === "server" ? t("dashboard.client") : t("dashboard.clientId") }}</div>
         <div class="metric-value">{{ identityText }}</div>
       </div>
       <div class="metric-card">
-        <div class="metric-label">映射数量</div>
+        <div class="metric-label">{{ t("dashboard.mappingCount") }}</div>
         <div class="metric-value">{{ mappings.length }}</div>
       </div>
       <div class="metric-card">
-        <div class="metric-label">{{ mode === "server" ? "待处理请求" : "最近错误" }}</div>
-        <div class="metric-value">{{ mode === "server" ? status.pending || 0 : status.lastError || "-" }}</div>
+        <div class="metric-label">{{ mode === "server" ? t("dashboard.pendingRequests") : t("dashboard.lastError") }}</div>
+        <div v-if="mode === 'server'" class="metric-value">{{ status.pending || 0 }}</div>
+        <div v-else class="metric-error" :class="{ empty: !status.lastError }">
+          {{ status.lastError || t("dashboard.noError") }}
+        </div>
       </div>
     </section>
 
-    <section v-if="mode === 'server'" class="panel">
-      <div class="panel-head"><h2>客户端连接情况</h2></div>
-      <el-descriptions :column="2" border>
-        <el-descriptions-item label="客户端 ID">{{ status.client?.id || "-" }}</el-descriptions-item>
-        <el-descriptions-item label="连接时间">{{ formatTime(status.client?.connectedAt) }}</el-descriptions-item>
-        <el-descriptions-item label="心跳延迟">{{ status.client?.latencyMs ?? "-" }} ms</el-descriptions-item>
-        <el-descriptions-item label="最后心跳">{{ formatTime(status.client?.lastPongAt) }}</el-descriptions-item>
-      </el-descriptions>
+    <section v-if="mode === 'server'" class="panel connection-panel">
+      <div class="panel-head"><h2>{{ t("dashboard.clientConnectionDetail") }}</h2></div>
+      <div class="connection-summary">
+        <div class="connection-mark" :class="{ online: mainConnected }"></div>
+        <div>
+          <div class="connection-title">{{ mainConnected ? t("dashboard.clientOnline") : t("dashboard.waitingClient") }}</div>
+          <div class="connection-subtitle">{{ status.client?.id || t("dashboard.noClientConnected") }}</div>
+        </div>
+      </div>
+      <div class="connection-grid">
+        <div class="connection-item">
+          <span>{{ t("dashboard.clientId") }}</span>
+          <strong>{{ status.client?.id || "-" }}</strong>
+        </div>
+        <div class="connection-item">
+          <span>{{ t("dashboard.connectedAt") }}</span>
+          <strong>{{ formatTime(status.client?.connectedAt) }}</strong>
+        </div>
+        <div class="connection-item">
+          <span>{{ t("dashboard.latency") }}</span>
+          <strong>{{ status.client?.latencyMs ?? "-" }} ms</strong>
+        </div>
+        <div class="connection-item">
+          <span>{{ t("dashboard.lastHeartbeat") }}</span>
+          <strong>{{ formatTime(status.client?.lastPongAt) }}</strong>
+        </div>
+      </div>
     </section>
 
-    <section v-if="mode === 'client'" class="panel">
-      <div class="panel-head"><h2>服务端连接情况</h2></div>
-      <el-descriptions :column="2" border>
-        <el-descriptions-item label="服务端 WebSocket 地址">{{ status.config?.serverUrl }}</el-descriptions-item>
-        <el-descriptions-item label="客户端 ID">{{ status.config?.clientId }}</el-descriptions-item>
-        <el-descriptions-item label="Token">{{ status.config?.tunnelToken ? "已设置" : "未设置" }}</el-descriptions-item>
-        <el-descriptions-item label="最后心跳">{{ formatTime(status.lastServerPingAt) }}</el-descriptions-item>
-        <el-descriptions-item label="重连间隔">{{ status.config?.reconnectMs }} ms</el-descriptions-item>
-        <el-descriptions-item label="请求超时">{{ status.config?.requestTimeoutMs }} ms</el-descriptions-item>
-        <el-descriptions-item label="管理 API 请求体上限">{{ status.config?.maxResponseBytes }}</el-descriptions-item>
-      </el-descriptions>
+    <section v-if="mode === 'client'" class="panel connection-panel">
+      <div class="panel-head"><h2>{{ t("dashboard.serverConnectionDetail") }}</h2></div>
+      <div class="connection-summary">
+        <div class="connection-mark" :class="{ online: mainConnected }"></div>
+        <div>
+          <div class="connection-title">{{ mainConnected ? t("dashboard.serverOnline") : t("dashboard.waitingServer") }}</div>
+          <div class="connection-subtitle">{{ status.config?.serverUrl || t("dashboard.noServerUrl") }}</div>
+        </div>
+      </div>
+      <div class="connection-grid">
+        <div class="connection-item span-wide">
+          <span>{{ t("dashboard.serverWsUrl") }}</span>
+          <strong>{{ status.config?.serverUrl || "-" }}</strong>
+        </div>
+        <div class="connection-item">
+          <span>{{ t("dashboard.clientId") }}</span>
+          <strong>{{ status.config?.clientId || "-" }}</strong>
+        </div>
+        <div class="connection-item">
+          <span>{{ t("dashboard.token") }}</span>
+          <strong>{{ status.config?.tunnelToken ? t("dashboard.tokenSet") : t("dashboard.tokenUnset") }}</strong>
+        </div>
+        <div class="connection-item">
+          <span>{{ t("dashboard.lastHeartbeat") }}</span>
+          <strong>{{ formatTime(status.lastServerPingAt) }}</strong>
+        </div>
+        <div class="connection-item">
+          <span>{{ t("dashboard.reconnectMs") }}</span>
+          <strong>{{ status.config?.reconnectMs }} ms</strong>
+        </div>
+        <div class="connection-item">
+          <span>{{ t("dashboard.requestTimeoutMs") }}</span>
+          <strong>{{ status.config?.requestTimeoutMs }} ms</strong>
+        </div>
+        <div class="connection-item">
+          <span>{{ t("dashboard.maxBodyBytes") }}</span>
+          <strong>{{ status.config?.maxResponseBytes }}</strong>
+        </div>
+      </div>
     </section>
 
     <section class="panel">
       <div class="panel-head">
-        <h2>端口映射情况</h2>
+        <h2>{{ t("dashboard.mappings") }}</h2>
         <div class="panel-actions">
-          <el-switch v-model="autoRefresh" active-text="自动刷新" />
-          <el-button @click="loadStatus">刷新</el-button>
-          <el-button v-if="mode === 'client'" type="primary" @click="openCreate">新增映射</el-button>
+          <el-switch v-model="autoRefresh" :active-text="t('dashboard.autoRefresh')" />
+          <el-button :icon="Refresh" @click="loadStatus">{{ t("dashboard.refresh") }}</el-button>
+          <el-button v-if="mode === 'client'" :icon="Plus" type="primary" @click="openCreate">{{ t("dashboard.addMapping") }}</el-button>
         </div>
       </div>
-      <el-table :data="mappings" stripe style="width: 100%">
-        <el-table-column label="连接状态" width="130">
+      <el-table :data="mappings" class="mapping-table" stripe style="width: 100%">
+        <el-table-column :label="t('dashboard.connectionStatus')" width="128">
           <template #default="{ row }">
-            <el-tag :type="row.status === 'connected' ? 'success' : row.status === 'disabled' ? 'warning' : 'danger'" effect="plain">
-              {{ row.status }}
-            </el-tag>
+            <span class="status-pill" :class="statusClass(row.status)">
+              <span></span>{{ statusText(row.status) }}
+            </span>
           </template>
         </el-table-column>
-        <el-table-column prop="name" label="名称" />
-        <el-table-column prop="serverPort" label="服务器端口" width="120" />
-        <el-table-column prop="clientHost" label="客户端主机" min-width="140" />
-        <el-table-column prop="clientPort" label="客户端端口" width="120" />
-        <el-table-column label="请求数" width="90">
-          <template #default="{ row }">{{ row.stats?.requestCount || 0 }}</template>
-        </el-table-column>
-        <el-table-column label="并发" width="80">
-          <template #default="{ row }">{{ row.stats?.activeRequests || 0 }}</template>
-        </el-table-column>
-        <el-table-column label="错误" width="80">
-          <template #default="{ row }">{{ row.stats?.errorCount || 0 }}</template>
-        </el-table-column>
-        <el-table-column label="流量" min-width="190">
+        <el-table-column :label="t('dashboard.mapping')" min-width="240">
           <template #default="{ row }">
-            <span class="nowrap">{{ formatBytes(row.stats?.bytesIn || 0) }} / {{ formatBytes(row.stats?.bytesOut || 0) }}</span>
+            <div class="mapping-name">{{ row.name || "-" }}</div>
+            <div class="mapping-route">
+              :{{ row.serverPort }} <span>-></span> {{ row.clientHost }}:{{ row.clientPort }}
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="实时速率" min-width="190">
+        <el-table-column :label="t('dashboard.requestCount')" width="90">
+          <template #default="{ row }"><span class="table-number">{{ row.stats?.requestCount || 0 }}</span></template>
+        </el-table-column>
+        <el-table-column :label="t('dashboard.activeRequests')" width="80">
+          <template #default="{ row }"><span class="table-number">{{ row.stats?.activeRequests || 0 }}</span></template>
+        </el-table-column>
+        <el-table-column :label="t('dashboard.errors')" width="80">
           <template #default="{ row }">
-            <span class="nowrap">{{ formatBytes(row.stats?.rateInBps || 0) }}/s / {{ formatBytes(row.stats?.rateOutBps || 0) }}/s</span>
+            <span class="table-number error-number" :class="{ 'has-error': row.stats?.errorCount > 0 }">{{ row.stats?.errorCount || 0 }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="最近访问" min-width="170">
-          <template #default="{ row }">{{ formatTime(row.stats?.lastAccessAt) }}</template>
-        </el-table-column>
-        <el-table-column v-if="mode === 'client'" label="启用" width="90">
-          <template #default="{ row }"><el-switch v-model="row.enabled" @change="saveMapping(row)" /></template>
-        </el-table-column>
-        <el-table-column v-if="mode === 'client'" label="操作" width="160" fixed="right">
+        <el-table-column :label="t('dashboard.traffic')" min-width="170">
           <template #default="{ row }">
-            <el-button size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button size="small" type="danger" @click="deleteMapping(row)">删除</el-button>
+            <div class="dual-metric">
+              <span><b>{{ t("dashboard.inbound") }}</b>{{ formatBytes(row.stats?.bytesIn || 0) }}</span>
+              <span><b>{{ t("dashboard.outbound") }}</b>{{ formatBytes(row.stats?.bytesOut || 0) }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column :label="t('dashboard.realtimeRate')" min-width="170">
+          <template #default="{ row }">
+            <div class="dual-metric">
+              <span><b>{{ t("dashboard.inbound") }}</b>{{ formatBytes(row.stats?.rateInBps || 0) }}/s</span>
+              <span><b>{{ t("dashboard.outbound") }}</b>{{ formatBytes(row.stats?.rateOutBps || 0) }}/s</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column :label="t('dashboard.lastAccess')" min-width="170">
+          <template #default="{ row }"><span class="table-time">{{ formatTime(row.stats?.lastAccessAt) }}</span></template>
+        </el-table-column>
+        <el-table-column v-if="mode === 'client'" :label="t('dashboard.actions')" width="190" fixed="right">
+          <template #default="{ row }">
+            <div class="operation-cell">
+              <label class="enable-control">
+                <span>{{ row.enabled ? t("dashboard.enabled") : t("dashboard.disabled") }}</span>
+                <el-switch v-model="row.enabled" size="small" @change="saveMapping(row)" />
+              </label>
+              <div class="table-actions">
+                <button type="button" class="row-action" @click="openEdit(row)">{{ t("dashboard.edit") }}</button>
+                <button type="button" class="row-action danger" @click="deleteMapping(row)">{{ t("dashboard.delete") }}</button>
+              </div>
+            </div>
           </template>
         </el-table-column>
       </el-table>
     </section>
 
     <section class="panel">
-      <div class="panel-head"><h2>日志</h2></div>
+      <div class="panel-head"><h2>{{ t("dashboard.logs") }}</h2></div>
       <div class="log-list">
-        <el-empty v-if="!logs.length" description="暂无日志" />
+        <el-empty v-if="!logs.length" :description="t('dashboard.noLogs')" />
         <div v-for="item in logs" :key="item.time + item.message" class="log-line">
-          <code>{{ item.time }}</code>
-          <el-tag :type="item.level === 'error' ? 'danger' : item.level === 'warn' ? 'warning' : 'success'" effect="plain">
+          <code class="log-time">{{ formatTime(item.time) }}</code>
+          <span class="log-level" :class="item.level">
             {{ item.level }}
-          </el-tag>
+          </span>
           <span>{{ item.message }} <code>{{ JSON.stringify(item.data) }}</code></span>
         </div>
       </div>
     </section>
 
     <section v-if="mode === 'server'" class="panel">
-      <div class="panel-head"><h2>审计日志</h2></div>
+      <div class="panel-head"><h2>{{ t("dashboard.auditLogs") }}</h2></div>
       <div class="log-list">
-        <el-empty v-if="!auditLogs.length" description="暂无审计日志" />
+        <el-empty v-if="!auditLogs.length" :description="t('dashboard.noAuditLogs')" />
         <div v-for="item in auditLogs" :key="item.id" class="log-line audit-line">
-          <code>{{ item.time }}</code>
-          <el-tag effect="plain">{{ item.event }}</el-tag>
+          <code class="log-time">{{ formatTime(item.time) }}</code>
+          <span class="log-level audit">{{ item.event }}</span>
           <span>{{ item.actor || "-" }} {{ item.ip || "" }} <code>{{ JSON.stringify(item.data) }}</code></span>
         </div>
       </div>
     </section>
 
-    <el-dialog v-model="mappingVisible" :title="editingId ? '编辑端口映射' : '新增端口映射'" width="560px">
+    <el-dialog v-model="mappingVisible" :title="editingId ? t('dashboard.editMapping') : t('dashboard.createMapping')" width="560px">
       <el-form label-position="top">
         <div class="form-grid">
-          <el-form-item label="名称"><el-input v-model="mappingForm.name" /></el-form-item>
-          <el-form-item label="服务器端口"><el-input-number v-model="mappingForm.serverPort" :min="1" class="full-input" /></el-form-item>
-          <el-form-item label="客户端主机"><el-input v-model="mappingForm.clientHost" /></el-form-item>
-          <el-form-item label="客户端端口"><el-input-number v-model="mappingForm.clientPort" :min="1" class="full-input" /></el-form-item>
-          <el-form-item label="启用"><el-switch v-model="mappingForm.enabled" /></el-form-item>
+          <el-form-item :label="t('dashboard.name')"><el-input v-model="mappingForm.name" /></el-form-item>
+          <el-form-item :label="t('dashboard.serverPort')"><el-input-number v-model="mappingForm.serverPort" :min="1" class="full-input" /></el-form-item>
+          <el-form-item :label="t('dashboard.clientHost')"><el-input v-model="mappingForm.clientHost" /></el-form-item>
+          <el-form-item :label="t('dashboard.clientPort')"><el-input-number v-model="mappingForm.clientPort" :min="1" class="full-input" /></el-form-item>
+          <el-form-item :label="t('dashboard.enable')"><el-switch v-model="mappingForm.enabled" /></el-form-item>
         </div>
       </el-form>
       <template #footer>
-        <el-button @click="mappingVisible = false">取消</el-button>
-        <el-button type="primary" @click="saveMappingDialog">保存</el-button>
+        <el-button @click="mappingVisible = false">{{ t("dashboard.cancel") }}</el-button>
+        <el-button type="primary" @click="saveMappingDialog">{{ t("dashboard.save") }}</el-button>
       </template>
     </el-dialog>
   </AppShell>
@@ -146,8 +215,10 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { Plus, Refresh } from "@element-plus/icons-vue";
 import AppShell from "./AppShell.vue";
 import { api } from "../api/client.js";
+import { t } from "../i18n.js";
 
 const props = defineProps({
   mode: { type: String, required: true }
@@ -162,8 +233,8 @@ const mappingVisible = ref(false);
 const editingId = ref("");
 const mappingForm = reactive({ name: "", serverPort: 2234, clientHost: "127.0.0.1", clientPort: 1234, enabled: true });
 
-const title = computed(() => (props.mode === "server" ? "HTTP Tunnel Server" : "HTTP Tunnel Client"));
-const subtitle = computed(() => (props.mode === "server" ? "服务端 Dashboard" : "客户端 Dashboard"));
+const title = computed(() => (props.mode === "server" ? t("dashboard.serverTitle") : t("dashboard.clientTitle")));
+const subtitle = computed(() => (props.mode === "server" ? t("dashboard.serverSubtitle") : t("dashboard.clientSubtitle")));
 const mainConnected = computed(() => (props.mode === "server" ? Boolean(status.value.client) : Boolean(status.value.connected)));
 const identityText = computed(() => (props.mode === "server" ? status.value.client?.id || "-" : status.value.config?.clientId || "-"));
 let refreshTimer = 0;
@@ -192,7 +263,30 @@ function formatBytes(value) {
 
 function formatTime(value) {
   if (!value) return "-";
-  return new Date(value).toLocaleString();
+  const text = String(value);
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)) return text;
+
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+
+  const pad = (number) => String(number).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join("-") + ` ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function statusText(value) {
+  if (value === "connected") return t("dashboard.connected");
+  if (value === "disabled") return t("dashboard.disabled");
+  return t("dashboard.disconnected");
+}
+
+function statusClass(value) {
+  if (value === "connected") return "online";
+  if (value === "disabled") return "paused";
+  return "offline";
 }
 
 function syncAutoRefresh() {
@@ -205,7 +299,7 @@ function syncAutoRefresh() {
 
 function openCreate() {
   editingId.value = "";
-  Object.assign(mappingForm, { name: "Web", serverPort: 2234, clientHost: "127.0.0.1", clientPort: 1234, enabled: true });
+  Object.assign(mappingForm, { name: t("dashboard.webDefaultName"), serverPort: 2234, clientHost: "127.0.0.1", clientPort: 1234, enabled: true });
   mappingVisible.value = true;
 }
 
@@ -217,20 +311,20 @@ function openEdit(row) {
 
 async function saveMapping(row) {
   applyStatus(await api.updateMapping(row.id, row));
-  ElMessage.success("映射已保存");
+  ElMessage.success(t("dashboard.mappingSaved"));
 }
 
 async function saveMappingDialog() {
   const data = editingId.value ? await api.updateMapping(editingId.value, mappingForm) : await api.createMapping(mappingForm);
   applyStatus(data);
   mappingVisible.value = false;
-  ElMessage.success("映射已保存");
+  ElMessage.success(t("dashboard.mappingSaved"));
 }
 
 async function deleteMapping(row) {
-  await ElMessageBox.confirm(`删除映射 ${row.name}？`, "确认删除", { type: "warning" });
+  await ElMessageBox.confirm(t("dashboard.deleteConfirm", { name: row.name }), t("dashboard.confirmDelete"), { type: "warning" });
   applyStatus(await api.deleteMapping(row.id));
-  ElMessage.success("映射已删除");
+  ElMessage.success(t("dashboard.mappingDeleted"));
 }
 
 watch(autoRefresh, syncAutoRefresh);
