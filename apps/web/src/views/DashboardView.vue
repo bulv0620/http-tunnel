@@ -108,7 +108,7 @@
       <el-table :data="mappings" class="mapping-table" stripe style="width: 100%">
         <el-table-column :label="t('dashboard.connectionStatus')" width="128">
           <template #default="{ row }">
-            <span class="status-pill" :class="statusClass(row.status)">
+            <span class="status-pill" :class="statusClass(row.status)" :title="row.statusMessage || statusText(row.status)">
               <span></span>{{ statusText(row.status) }}
             </span>
           </template>
@@ -119,6 +119,7 @@
             <div class="mapping-route">
               :{{ row.serverPort }} <span>-></span> {{ row.clientHost }}:{{ row.clientPort }}
             </div>
+            <div v-if="row.statusMessage" class="mapping-error">{{ row.statusMessage }}</div>
           </template>
         </el-table-column>
         <el-table-column :label="t('dashboard.requestCount')" width="90">
@@ -156,11 +157,11 @@
             <div class="operation-cell">
               <label class="enable-control">
                 <span>{{ row.enabled ? t("dashboard.enabled") : t("dashboard.disabled") }}</span>
-                <el-switch v-model="row.enabled" size="small" @change="saveMapping(row)" />
+                <el-switch v-model="row.enabled" size="small" :loading="isMappingSaving(row.id)" :disabled="isMappingSaving(row.id)" @change="(enabled) => saveMapping(row, enabled)" />
               </label>
               <div class="table-actions">
-                <button type="button" class="row-action" @click="openEdit(row)">{{ t("dashboard.edit") }}</button>
-                <button type="button" class="row-action danger" @click="deleteMapping(row)">{{ t("dashboard.delete") }}</button>
+                <button type="button" class="row-action" :disabled="isMappingSaving(row.id)" @click="openEdit(row)">{{ t("dashboard.edit") }}</button>
+                <button type="button" class="row-action danger" :disabled="isMappingSaving(row.id)" @click="deleteMapping(row)">{{ t("dashboard.delete") }}</button>
               </div>
             </div>
           </template>
@@ -214,7 +215,7 @@
       </el-form>
       <template #footer>
         <el-button @click="mappingVisible = false">{{ t("dashboard.cancel") }}</el-button>
-        <el-button type="primary" @click="saveMappingDialog">{{ t("dashboard.save") }}</el-button>
+        <el-button type="primary" :loading="mappingDialogSaving" @click="saveMappingDialog">{{ t("dashboard.save") }}</el-button>
       </template>
     </el-dialog>
   </AppShell>
@@ -239,6 +240,8 @@ const auditLogs = ref([]);
 const autoRefresh = ref(true);
 const mappingVisible = ref(false);
 const editingId = ref("");
+const mappingDialogSaving = ref(false);
+const savingMappingIds = ref(new Set());
 const mappingForm = reactive({ name: "", serverPort: 2234, clientHost: "127.0.0.1", clientPort: 1234, enabled: true });
 
 const title = computed(() => (props.mode === "server" ? t("dashboard.serverTitle") : t("dashboard.clientTitle")));
@@ -288,13 +291,26 @@ function formatTime(value) {
 function statusText(value) {
   if (value === "connected") return t("dashboard.connected");
   if (value === "disabled") return t("dashboard.disabled");
+  if (value === "error") return t("dashboard.errors");
   return t("dashboard.disconnected");
 }
 
 function statusClass(value) {
   if (value === "connected") return "online";
   if (value === "disabled") return "paused";
+  if (value === "error") return "offline";
   return "offline";
+}
+
+function isMappingSaving(id) {
+  return savingMappingIds.value.has(id);
+}
+
+function setMappingSaving(id, saving) {
+  const next = new Set(savingMappingIds.value);
+  if (saving) next.add(id);
+  else next.delete(id);
+  savingMappingIds.value = next;
 }
 
 function syncAutoRefresh() {
@@ -317,22 +333,45 @@ function openEdit(row) {
   mappingVisible.value = true;
 }
 
-async function saveMapping(row) {
-  applyStatus(await api.updateMapping(row.id, row));
-  ElMessage.success(t("dashboard.mappingSaved"));
+async function saveMapping(row, enabled) {
+  const previousEnabled = !enabled;
+  setMappingSaving(row.id, true);
+  try {
+    applyStatus(await api.updateMapping(row.id, row));
+    ElMessage.success(t("dashboard.mappingSaved"));
+  } catch (err) {
+    row.enabled = previousEnabled;
+    ElMessage.error(err.message || t("config.saveFailed"));
+  } finally {
+    setMappingSaving(row.id, false);
+  }
 }
 
 async function saveMappingDialog() {
-  const data = editingId.value ? await api.updateMapping(editingId.value, mappingForm) : await api.createMapping(mappingForm);
-  applyStatus(data);
-  mappingVisible.value = false;
-  ElMessage.success(t("dashboard.mappingSaved"));
+  mappingDialogSaving.value = true;
+  try {
+    const data = editingId.value ? await api.updateMapping(editingId.value, mappingForm) : await api.createMapping(mappingForm);
+    applyStatus(data);
+    mappingVisible.value = false;
+    ElMessage.success(t("dashboard.mappingSaved"));
+  } catch (err) {
+    ElMessage.error(err.message || t("config.saveFailed"));
+  } finally {
+    mappingDialogSaving.value = false;
+  }
 }
 
 async function deleteMapping(row) {
-  await ElMessageBox.confirm(t("dashboard.deleteConfirm", { name: row.name }), t("dashboard.confirmDelete"), { type: "warning" });
-  applyStatus(await api.deleteMapping(row.id));
-  ElMessage.success(t("dashboard.mappingDeleted"));
+  try {
+    await ElMessageBox.confirm(t("dashboard.deleteConfirm", { name: row.name }), t("dashboard.confirmDelete"), { type: "warning" });
+    setMappingSaving(row.id, true);
+    applyStatus(await api.deleteMapping(row.id));
+    ElMessage.success(t("dashboard.mappingDeleted"));
+  } catch (err) {
+    if (err !== "cancel" && err !== "close") ElMessage.error(err.message || t("config.saveFailed"));
+  } finally {
+    setMappingSaving(row.id, false);
+  }
 }
 
 watch(autoRefresh, syncAutoRefresh);

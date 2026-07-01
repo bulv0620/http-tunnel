@@ -39,6 +39,7 @@ const pending = new Map();
 const mappingServers = new Map();
 const mappingSpecs = new Map();
 const mappingStats = new Map();
+const mappingListenErrors = new Map();
 let client = null;
 let clientUpgradeInProgress = false;
 let mappings = [];
@@ -77,9 +78,27 @@ function updateRates(stats) {
 function mappingStatus(mapping) {
   const server = mappingServers.get(mapping.id);
   if (!mapping.enabled) return "disabled";
+  if (mappingListenErrors.has(mapping.id)) return "error";
   if (!server) return "stopped";
   if (!client || client.readyState !== WS_OPEN) return "disconnected";
   return server.listening ? "connected" : "error";
+}
+
+function mappingStatusMessage(mapping) {
+  return mappingListenErrors.get(mapping.id) || "";
+}
+
+function mappingStatusPayload() {
+  return mappings.map((mapping) => ({
+    id: mapping.id,
+    status: mappingStatus(mapping),
+    statusMessage: mappingStatusMessage(mapping)
+  }));
+}
+
+function sendMappingStatus(ws = client) {
+  if (!ws || ws.readyState !== WS_OPEN) return false;
+  return sendWs(ws, JSON.stringify({ type: "mapping-status", mappings: mappingStatusPayload() }));
 }
 
 function stopRemovedMappings(nextMappings) {
@@ -90,24 +109,32 @@ function stopRemovedMappings(nextMappings) {
     mappingServers.delete(id);
     mappingSpecs.delete(id);
     mappingStats.delete(id);
+    mappingListenErrors.delete(id);
   }
 }
 
 function startMapping(mapping) {
   if (!mapping.enabled || mappingServers.has(mapping.id)) return;
   const server = http.createServer((req, res) => handleMappedRequest(mapping, req, res));
-  server.on("error", (error) => logger.error("mapping listen failed", {
-    id: mapping.id,
-    serverPort: mapping.serverPort,
-    error: error.message
-  }));
+  mappingListenErrors.delete(mapping.id);
+  server.on("error", (error) => {
+    mappingListenErrors.set(mapping.id, error.message);
+    logger.error("mapping listen failed", {
+      id: mapping.id,
+      serverPort: mapping.serverPort,
+      error: error.message
+    });
+    void sendMappingStatus();
+  });
   server.listen(mapping.serverPort, config.host, () => {
+    mappingListenErrors.delete(mapping.id);
     logger.info("mapping listening", {
       id: mapping.id,
       serverPort: mapping.serverPort,
       clientHost: mapping.clientHost,
       clientPort: mapping.clientPort
     });
+    void sendMappingStatus();
   });
   mappingServers.set(mapping.id, server);
   mappingSpecs.set(mapping.id, JSON.stringify(mapping));
@@ -123,6 +150,7 @@ function applyMappings(nextMappings) {
       mappingServers.get(mapping.id)?.close();
       mappingServers.delete(mapping.id);
       mappingSpecs.delete(mapping.id);
+      mappingListenErrors.delete(mapping.id);
     }
   }
   mappings = normalized;
@@ -274,7 +302,7 @@ function statusPayload(req) {
       latencyMs: client.latencyMs ?? null,
       lastPongAt: client.lastPongAt || ""
     } : null,
-    mappings: mappings.map((mapping) => ({ ...mapping, status: mappingStatus(mapping), stats: updateRates(statsFor(mapping.id)) })),
+    mappings: mappings.map((mapping) => ({ ...mapping, status: mappingStatus(mapping), statusMessage: mappingStatusMessage(mapping), stats: updateRates(statsFor(mapping.id)) })),
     pending: pending.size,
     logs: logger.entries,
     auditLogs: listAuditLogs(100)
@@ -487,6 +515,7 @@ wss.on("connection", (ws) => {
       applyMappings(payload.mappings || []);
       logger.info("mappings updated", { count: mappings.length });
       addAuditLog("mappings_updated", { actor: ws.clientId, data: { count: mappings.length } });
+      void sendMappingStatus(ws);
       return;
     }
     if (payload.type === "response-start" && payload.id) startResponse(payload);

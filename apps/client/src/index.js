@@ -49,6 +49,7 @@ let lastServerPingAt = "";
 let connectorStarted = false;
 const activeRequests = new Map();
 const mappingStats = new Map();
+const remoteMappingStatuses = new Map();
 
 function statsFor(id) {
   if (!mappingStats.has(id)) {
@@ -226,7 +227,12 @@ function startConnector() {
 function mappingStatus(mapping) {
   if (!mapping.enabled) return "disabled";
   if (!connected) return "disconnected";
-  return "connected";
+  return remoteMappingStatuses.get(mapping.id)?.status || "connected";
+}
+
+function mappingStatusMessage(mapping) {
+  if (!connected) return "";
+  return remoteMappingStatuses.get(mapping.id)?.statusMessage || "";
 }
 
 function findMapping(id) {
@@ -385,6 +391,12 @@ async function connectForever() {
         }
         if (message.type === "request-start" && message.id) handleRequestStart(ws, message);
         if (message.type === "request-end" && message.id) handleRequestEnd(ws, message.id);
+        if (message.type === "mapping-status") {
+          remoteMappingStatuses.clear();
+          for (const item of message.mappings || []) {
+            if (item.id) remoteMappingStatuses.set(item.id, item);
+          }
+        }
         if (message.type === "request-error" && message.id) {
           const active = activeRequests.get(message.id);
           active?.localReq.destroy(new Error(message.error || "request error"));
@@ -424,7 +436,7 @@ function statusPayload(req) {
     connected,
     lastError,
     lastServerPingAt,
-    mappings: config.mappings.map((mapping) => ({ ...mapping, status: mappingStatus(mapping), stats: updateRates(statsFor(mapping.id)) })),
+    mappings: config.mappings.map((mapping) => ({ ...mapping, status: mappingStatus(mapping), statusMessage: mappingStatusMessage(mapping), stats: updateRates(statsFor(mapping.id)) })),
     logs: logger.entries
   };
 }
