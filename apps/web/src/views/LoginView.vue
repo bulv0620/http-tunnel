@@ -18,7 +18,7 @@
         <el-form-item :label="t('auth.password')">
           <el-input v-model="form.password" type="password" autocomplete="current-password" show-password />
         </el-form-item>
-        <el-button type="primary" class="full-button" @click="login">{{ t("auth.login") }}</el-button>
+        <el-button type="primary" class="full-button" :loading="loading" @click="login">{{ t("auth.login") }}</el-button>
       </el-form>
     </el-card>
   </main>
@@ -33,10 +33,13 @@ import { applyAuth, dashboardRoute, state } from "../store.js";
 
 const router = useRouter();
 const error = ref("");
+const loading = ref(false);
 const form = reactive({ username: "admin", password: "" });
 
 async function login() {
+  if (loading.value) return;
   error.value = "";
+  loading.value = true;
   try {
     await api.login(form);
     applyAuth({ username: form.username });
@@ -44,6 +47,8 @@ async function login() {
   } catch (err) {
     error.value = err.status === 401 ? t("auth.invalidCredentials") : err.message || t("auth.loginFailed");
     if (!state.configured) router.push("/setup");
+  } finally {
+    loading.value = false;
   }
 }
 </script>

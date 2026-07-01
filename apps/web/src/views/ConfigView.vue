@@ -1,6 +1,6 @@
 <template>
   <AppShell :title="title" :subtitle="t('config.subtitle')">
-    <section class="panel">
+    <section class="panel" v-loading="loading">
       <div class="panel-head"><h2>{{ t("config.basic") }}</h2></div>
       <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="block-gap" />
       <el-form label-position="top">
@@ -37,7 +37,7 @@
             <el-input-number v-model="sizeValue" :min="1024" class="full-input" />
           </el-form-item>
         </div>
-        <el-button type="primary" @click="save">{{ t("config.save") }}</el-button>
+        <el-button type="primary" :loading="saving" @click="save">{{ t("config.save") }}</el-button>
       </el-form>
     </section>
   </AppShell>
@@ -56,6 +56,8 @@ const props = defineProps({
 });
 
 const error = ref("");
+const loading = ref(false);
+const saving = ref(false);
 const form = reactive({
   baseUrl: "/",
   adminUser: "admin",
@@ -97,12 +99,22 @@ function reloadConfigPage(baseUrl) {
 }
 
 async function loadConfig() {
-  const data = await api.config();
-  applyConfig(data.config);
+  loading.value = true;
+  error.value = "";
+  try {
+    const data = await api.config();
+    applyConfig(data.config);
+  } catch (err) {
+    error.value = err.message || t("config.saveFailed");
+  } finally {
+    loading.value = false;
+  }
 }
 
 async function save() {
+  if (saving.value) return;
   error.value = "";
+  saving.value = true;
   try {
     const data = await api.saveConfig(form);
     applyConfig(data.config);
@@ -112,6 +124,8 @@ async function save() {
     setTimeout(() => reloadConfigPage(data.redirectBaseUrl), 150);
   } catch (err) {
     error.value = err.message || t("config.saveFailed");
+  } finally {
+    saving.value = false;
   }
 }
 

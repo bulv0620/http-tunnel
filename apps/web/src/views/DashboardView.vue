@@ -1,6 +1,8 @@
 <template>
   <AppShell :title="title" :subtitle="subtitle">
-    <section class="metric-grid">
+    <el-alert v-if="statusError" :title="statusError" type="error" show-icon :closable="false" class="block-gap" />
+
+    <section class="metric-grid" v-loading="statusLoading && !Object.keys(status).length">
       <div class="metric-card">
         <div class="metric-label">{{ mode === "server" ? t("dashboard.clientConnection") : t("dashboard.serverConnection") }}</div>
         <div class="metric-value">
@@ -101,7 +103,7 @@
         <h2>{{ t("dashboard.mappings") }}</h2>
         <div class="panel-actions">
           <el-switch v-model="autoRefresh" :active-text="t('dashboard.autoRefresh')" />
-          <el-button :icon="Refresh" @click="loadStatus">{{ t("dashboard.refresh") }}</el-button>
+          <el-button :icon="Refresh" :loading="statusLoading" @click="loadStatus()">{{ t("dashboard.refresh") }}</el-button>
           <el-button v-if="mode === 'client'" :icon="Plus" type="primary" @click="openCreate">{{ t("dashboard.addMapping") }}</el-button>
         </div>
       </div>
@@ -238,6 +240,8 @@ const mappings = ref([]);
 const logs = ref([]);
 const auditLogs = ref([]);
 const autoRefresh = ref(true);
+const statusError = ref("");
+const statusLoading = ref(false);
 const mappingVisible = ref(false);
 const editingId = ref("");
 const mappingDialogSaving = ref(false);
@@ -257,8 +261,18 @@ function applyStatus(data) {
   auditLogs.value = data.auditLogs || [];
 }
 
-async function loadStatus() {
-  applyStatus(await api.status());
+async function loadStatus(options = {}) {
+  const { silent = false } = options;
+  statusLoading.value = true;
+  try {
+    applyStatus(await api.status());
+    statusError.value = "";
+  } catch (err) {
+    statusError.value = err.message || t("config.saveFailed");
+    if (!silent) ElMessage.error(statusError.value);
+  } finally {
+    statusLoading.value = false;
+  }
 }
 
 function formatBytes(value) {
@@ -318,7 +332,7 @@ function syncAutoRefresh() {
     clearInterval(refreshTimer);
     refreshTimer = 0;
   }
-  if (autoRefresh.value) refreshTimer = window.setInterval(loadStatus, 5000);
+  if (autoRefresh.value) refreshTimer = window.setInterval(() => loadStatus({ silent: true }), 5000);
 }
 
 function openCreate() {
@@ -377,7 +391,7 @@ async function deleteMapping(row) {
 watch(autoRefresh, syncAutoRefresh);
 
 onMounted(() => {
-  loadStatus();
+  loadStatus({ silent: true });
   syncAutoRefresh();
 });
 

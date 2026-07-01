@@ -16,7 +16,7 @@
           <div class="avatar">{{ adminInitial }}</div>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item :icon="SwitchButton" @click="logout">{{ t("app.logout") }}</el-dropdown-item>
+              <el-dropdown-item :icon="SwitchButton" :disabled="loggingOut" @click="logout">{{ t("app.logout") }}</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -29,8 +29,9 @@
 </template>
 
 <script setup>
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
+import { ElMessage } from "element-plus";
 import { Connection, DataLine, Setting, SwitchButton } from "@element-plus/icons-vue";
 import { api } from "../api/client.js";
 import { currentLanguageLabel, t, toggleLocale } from "../i18n.js";
@@ -45,10 +46,19 @@ const router = useRouter();
 const adminInitial = computed(() => (state.user?.username || "A").slice(0, 1).toUpperCase());
 const isDashboard = computed(() => router.currentRoute.value.path === dashboardRoute());
 const isConfig = computed(() => router.currentRoute.value.path === configRoute());
+const loggingOut = ref(false);
 
 async function logout() {
-  await api.logout();
-  applyAuth(null);
-  router.push("/login");
+  if (loggingOut.value) return;
+  loggingOut.value = true;
+  try {
+    await api.logout();
+    applyAuth(null);
+    router.push("/login");
+  } catch (err) {
+    ElMessage.error(err.message || t("auth.loginFailed"));
+  } finally {
+    loggingOut.value = false;
+  }
 }
 </script>

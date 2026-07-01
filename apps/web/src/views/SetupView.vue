@@ -42,7 +42,7 @@
             <el-input-number v-model="sizeValue" :min="1024" class="full-input" />
           </el-form-item>
         </div>
-        <el-button type="primary" class="full-button" @click="save">{{ t("config.save") }}</el-button>
+        <el-button type="primary" class="full-button" :loading="saving" @click="save">{{ t("config.save") }}</el-button>
       </el-form>
     </el-card>
   </main>
@@ -58,6 +58,7 @@ import { refreshSetup, state } from "../store.js";
 
 const router = useRouter();
 const error = ref("");
+const saving = ref(false);
 const form = reactive({
   baseUrl: "/",
   adminUser: "admin",
@@ -85,7 +86,9 @@ function jumpToBase(baseUrl) {
 }
 
 async function save() {
+  if (saving.value) return;
   error.value = "";
+  saving.value = true;
   try {
     const payload = { ...form };
     const result = await api.setup(payload);
@@ -95,6 +98,8 @@ async function save() {
     jumpToBase(nextBase);
   } catch (err) {
     error.value = err.message || t("config.saveFailed");
+  } finally {
+    saving.value = false;
   }
 }
 </script>
