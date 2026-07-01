@@ -449,14 +449,18 @@ select {
 }
 
 .log-list {
-  display: grid;
-  gap: 0;
-  max-height: 340px;
-  overflow: auto;
-  padding: 2px 0;
-  background: transparent;
+  padding: 10px 8px 10px 12px;
+  border: 1px solid rgba(15, 23, 42, 0.07);
+  border-radius: var(--radius);
+  background: rgba(248, 250, 252, 0.86);
   color: #334155;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.log-list-inner {
+  display: grid;
+  gap: 0;
+  padding-right: 8px;
 }
 
 .log-line {
@@ -539,6 +543,20 @@ select {
 
 .login-card {
   width: min(420px, 100%);
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-icon {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  box-shadow: 0 12px 26px rgba(0, 122, 255, 0.22);
 }
 
 .setup-card {

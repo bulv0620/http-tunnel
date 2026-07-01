@@ -2,9 +2,12 @@
   <main class="login-page">
     <el-card class="login-card" shadow="never">
       <template #header>
-        <div>
-          <h1>HTTP Tunnel</h1>
-          <div class="subtitle">{{ t("auth.adminLogin") }}</div>
+        <div class="login-brand">
+          <img class="brand-icon" src="/icon.svg" alt="HTTP Tunnel" width="44" height="44" />
+          <div>
+            <h1>HTTP Tunnel</h1>
+            <div class="subtitle">{{ t("auth.adminLogin") }}</div>
+          </div>
         </div>
       </template>
       <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="block-gap" />

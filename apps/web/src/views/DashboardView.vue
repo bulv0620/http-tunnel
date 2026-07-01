@@ -171,26 +171,34 @@
     <section class="panel">
       <div class="panel-head"><h2>{{ t("dashboard.logs") }}</h2></div>
       <div class="log-list">
-        <el-empty v-if="!logs.length" :description="t('dashboard.noLogs')" />
-        <div v-for="item in logs" :key="item.time + item.message" class="log-line">
-          <code class="log-time">{{ formatTime(item.time) }}</code>
-          <span class="log-level" :class="item.level">
-            {{ item.level }}
-          </span>
-          <span>{{ item.message }} <code>{{ JSON.stringify(item.data) }}</code></span>
-        </div>
+        <el-scrollbar max-height="340px">
+          <div class="log-list-inner">
+            <el-empty v-if="!logs.length" :description="t('dashboard.noLogs')" />
+            <div v-for="item in logs" :key="item.time + item.message" class="log-line">
+              <code class="log-time">{{ formatTime(item.time) }}</code>
+              <span class="log-level" :class="item.level">
+                {{ item.level }}
+              </span>
+              <span>{{ item.message }} <code>{{ JSON.stringify(item.data) }}</code></span>
+            </div>
+          </div>
+        </el-scrollbar>
       </div>
     </section>
 
     <section v-if="mode === 'server'" class="panel">
       <div class="panel-head"><h2>{{ t("dashboard.auditLogs") }}</h2></div>
       <div class="log-list">
-        <el-empty v-if="!auditLogs.length" :description="t('dashboard.noAuditLogs')" />
-        <div v-for="item in auditLogs" :key="item.id" class="log-line audit-line">
-          <code class="log-time">{{ formatTime(item.time) }}</code>
-          <span class="log-level audit">{{ item.event }}</span>
-          <span>{{ item.actor || "-" }} {{ item.ip || "" }} <code>{{ JSON.stringify(item.data) }}</code></span>
-        </div>
+        <el-scrollbar max-height="340px">
+          <div class="log-list-inner">
+            <el-empty v-if="!auditLogs.length" :description="t('dashboard.noAuditLogs')" />
+            <div v-for="item in auditLogs" :key="item.id" class="log-line audit-line">
+              <code class="log-time">{{ formatTime(item.time) }}</code>
+              <span class="log-level audit">{{ item.event }}</span>
+              <span>{{ item.actor || "-" }} {{ item.ip || "" }} <code>{{ JSON.stringify(item.data) }}</code></span>
+            </div>
+          </div>
+        </el-scrollbar>
       </div>
     </section>
 

@@ -1,6 +1,6 @@
 {
   "name": "http-tunnel",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "HTTP reverse tunnel monorepo with separate web, server, and client apps.",
   "type": "module",
