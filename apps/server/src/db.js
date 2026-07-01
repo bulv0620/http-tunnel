@@ -74,11 +74,13 @@ export function loadSettings() {
 
 export function saveSettings(input) {
   const password = String(input.adminPassword || "");
+  const tunnelToken = validateToken(input.tunnelToken);
+  if (!tunnelToken) throw new Error("tunnel token is required");
   const next = {
     baseUrl: validateBaseUrl(input.baseUrl),
     adminUser: String(input.adminUser || "").trim(),
     adminPassword: password && isPasswordHash(password) ? password : hashPassword(password),
-    tunnelToken: validateToken(input.tunnelToken),
+    tunnelToken,
     requestTimeoutMs: validatePositiveNumber(input.requestTimeoutMs, "requestTimeoutMs", defaults.requestTimeoutMs),
     maxBodyBytes: validatePositiveNumber(input.maxBodyBytes, "adminApiMaxBodyBytes", defaults.maxBodyBytes)
   };

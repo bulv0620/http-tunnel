@@ -40,6 +40,7 @@ const mappingServers = new Map();
 const mappingSpecs = new Map();
 const mappingStats = new Map();
 let client = null;
+let clientUpgradeInProgress = false;
 let mappings = [];
 
 function statsFor(id) {
@@ -290,10 +291,20 @@ function publicConfig() {
   };
 }
 
+function closeClient(code, reason) {
+  if (!client || client.readyState !== WS_OPEN) return;
+  client.close(code, reason);
+}
+
 function applySavedSettings(next) {
+  const wasConfigured = isConfigured(config);
   const previousBaseUrl = config.baseUrl;
+  const previousTunnelToken = config.tunnelToken;
   Object.assign(config, listenConfig, next);
   ensureAdmin(config);
+  if ((!wasConfigured && isConfigured(config)) || previousTunnelToken !== config.tunnelToken) {
+    closeClient(4003, "server tunnel token changed");
+  }
   return {
     redirectBaseUrl: previousBaseUrl !== config.baseUrl ? config.baseUrl : ""
   };
@@ -402,27 +413,48 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
 
-  const auth = String(req.headers.authorization || "");
-  const headerToken = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
-  const token = headerToken || url.searchParams.get("token") || "";
-  if (config.tunnelToken && token !== config.tunnelToken) {
-    addAuditLog("tunnel_auth_failed", { ip: clientIp(req), data: { clientId: url.searchParams.get("clientId") || "" } });
-    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+  const clientId = url.searchParams.get("clientId") || "";
+  const rejectTunnel = (statusCode, statusText, event, data = {}) => {
+    addAuditLog(event, { ip: clientIp(req), data: { clientId, ...data } });
+    socket.write(`HTTP/1.1 ${statusCode} ${statusText}\r\n\r\n`);
     socket.destroy();
+  };
+
+  if (!isConfigured(config) || !config.tunnelToken) {
+    rejectTunnel(503, "Service Unavailable", "tunnel_rejected_unconfigured");
     return;
   }
 
-  wss.handleUpgrade(req, socket, head, (ws) => {
-    ws.clientId = url.searchParams.get("clientId") || "client";
-    ws.connectedAt = new Date().toISOString();
-    ws.lastPongAt = "";
-    ws.latencyMs = null;
-    wss.emit("connection", ws, req);
-  });
+  const auth = String(req.headers.authorization || "");
+  const headerToken = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
+  const token = headerToken || url.searchParams.get("token") || "";
+  if (token !== config.tunnelToken) {
+    rejectTunnel(401, "Unauthorized", "tunnel_auth_failed");
+    return;
+  }
+
+  if (clientUpgradeInProgress || (client && client.readyState === WS_OPEN)) {
+    rejectTunnel(409, "Conflict", "tunnel_client_rejected", { reason: "client already connected" });
+    return;
+  }
+
+  clientUpgradeInProgress = true;
+  try {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      ws.clientId = clientId || "client";
+      ws.connectedAt = new Date().toISOString();
+      ws.lastPongAt = "";
+      ws.latencyMs = null;
+      wss.emit("connection", ws, req);
+    });
+  } catch {
+    clientUpgradeInProgress = false;
+    socket.destroy();
+  }
 });
 
 wss.on("connection", (ws) => {
-  if (client && client.readyState === WS_OPEN) client.close(4000, "replaced by newer client");
+  clientUpgradeInProgress = false;
   client = ws;
   logger.info("client connected", { clientId: ws.clientId });
   addAuditLog("client_connected", { actor: ws.clientId, data: { clientId: ws.clientId } });

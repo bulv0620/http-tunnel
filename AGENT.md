@@ -75,12 +75,17 @@ Important files:
 apps/web/src/router.js
 apps/web/src/store.js
 apps/web/src/api/client.js
+apps/web/src/i18n.js
+apps/web/src/style.css
 apps/web/src/views/LoginView.vue
 apps/web/src/views/SetupView.vue
 apps/web/src/views/ServerDashboard.vue
 apps/web/src/views/ClientDashboard.vue
 apps/web/src/views/ServerConfig.vue
 apps/web/src/views/ClientConfig.vue
+apps/web/src/views/AppShell.vue
+apps/web/src/views/DashboardView.vue
+apps/web/src/views/ConfigView.vue
 ```
 
 The frontend is built with:
@@ -96,6 +101,25 @@ If assets are missing, server/client return:
 ```json
 {"ok":false,"error":"web assets not built"}
 ```
+
+The web UI has a lightweight i18n layer in `apps/web/src/i18n.js`.
+
+Current locales:
+
+```text
+en
+zh-CN
+```
+
+The selected locale is stored in localStorage under:
+
+```text
+http-tunnel.locale
+```
+
+When adding or changing user-facing frontend text, update both locale dictionaries and use `t("...")` in Vue components instead of hard-coded labels/messages. Existing login, setup, config, shell, and dashboard screens follow this pattern.
+
+The frontend visual system is mostly centralized in `apps/web/src/style.css`. It uses a responsive control-center style with sticky top navigation, metric cards, connection summaries, status pills, compact log lists, and responsive tables. Prefer extending the existing classes and CSS variables over adding one-off component styling.
 
 ## Auth And Setup
 
@@ -126,6 +150,16 @@ Authorization: Bearer <token>
 ```
 
 The server still has backward-compatible fallback for `?token=...`.
+
+Server tunnel authentication is intentionally strict:
+
+- the server must be fully initialized before accepting tunnel WebSocket upgrades
+- the server tunnel token is required and cannot be empty
+- a bad tunnel token must fail the WebSocket upgrade with `401`
+- if one client is already connected, another client must be rejected instead of replacing it
+- when the server tunnel token changes, the existing tunnel connection must be closed so the client has to re-authenticate immediately
+
+This protects the intended one-server-to-one-client model. Do not reintroduce behavior where an unconfigured server accepts tunnel connections, where an empty token disables auth, or where a newer client silently replaces the active client.
 
 ## Transfer Model
 
@@ -297,9 +331,12 @@ node --check apps/client/src/index.js
 ## Important Design Decisions
 
 - Do not reintroduce EJS pages. The project has moved to separated frontend/backend.
+- Frontend user-facing text should go through `apps/web/src/i18n.js`; keep `en` and `zh-CN` translations in sync.
+- Keep the current Vue/Element Plus control-center UI style consistent. Prefer shared classes in `apps/web/src/style.css` over scattered per-view styling.
 - Do not expand env config unless there is a strong reason. Most settings belong in SQLite setup/config pages.
 - Server dashboard must not edit mappings. Mappings are controlled by the client.
 - Client should not attempt to connect to the server before first-run setup is complete.
+- Server tunnel access must remain authenticated and one-to-one. Reject extra clients; do not auto-replace the connected client.
 - Docker should remain easy to reset by default. Avoid adding DB volumes unless the user explicitly wants persistence.
 - README should describe the client as a generic client host, not as a NAS-specific service.
 
