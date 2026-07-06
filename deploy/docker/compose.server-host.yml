@@ -11,3 +11,5 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 12400
+    volumes:
+      - ../../db/server:/app/apps/server/db

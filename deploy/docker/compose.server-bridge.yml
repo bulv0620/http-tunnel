@@ -15,3 +15,5 @@ services:
       # Add every server mapping port you create in the client UI.
       # Example:
       # - "2234:2234"
+    volumes:
+      - ../../db/server:/app/apps/server/db
