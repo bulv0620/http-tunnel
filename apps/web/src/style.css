@@ -332,6 +332,14 @@ select {
   margin-bottom: 16px;
 }
 
+.panel .el-loading-mask,
+.metric-grid .el-loading-mask {
+  border-radius: inherit;
+  background: rgba(255, 255, 255, 0.68);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+}
+
 .connection-panel {
   overflow: hidden;
 }
