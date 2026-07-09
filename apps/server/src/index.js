@@ -37,6 +37,7 @@ const logger = createLogger("server");
 const WS_OPEN = 1;
 const HEARTBEAT_IDLE_MS = 15000;
 const HEARTBEAT_TIMEOUT_MS = 60000;
+const REQUEST_IDLE_TIMEOUTS_BEFORE_RECONNECT = 2;
 const pending = new Map();
 const mappingServers = new Map();
 const mappingSpecs = new Map();
@@ -232,12 +233,41 @@ function finishPending(id, errorMessage = "") {
   return item;
 }
 
+function terminateClient(reason, data = {}) {
+  if (!client || client.readyState !== WS_OPEN) return;
+  logger.warn("terminating client connection", {
+    clientId: client.clientId,
+    reason,
+    pending: pending.size,
+    bufferedAmount: client.bufferedAmount,
+    ...data
+  });
+  client.terminate();
+}
+
+function resetClientRequestIdleTimeouts(ws = client) {
+  if (ws && ws.readyState === WS_OPEN) ws.requestIdleTimeouts = 0;
+}
+
 function createIdleTimer(id, res) {
   const timeout = () => {
     const item = finishPending(id, "tunnel request idle timed out");
     if (!item) return;
     if (!res.headersSent) res.writeHead(504, { "content-type": "text/plain; charset=utf-8" });
     res.end("tunnel request idle timed out");
+    if (client && client.readyState === WS_OPEN) {
+      client.requestIdleTimeouts = (client.requestIdleTimeouts || 0) + 1;
+      logger.warn("tunnel request idle timed out", {
+        clientId: client.clientId,
+        requestId: id,
+        mappingId: item.mappingId,
+        requestIdleTimeouts: client.requestIdleTimeouts,
+        maxRequestIdleTimeouts: REQUEST_IDLE_TIMEOUTS_BEFORE_RECONNECT
+      });
+      if (client.requestIdleTimeouts >= REQUEST_IDLE_TIMEOUTS_BEFORE_RECONNECT) {
+        terminateClient("repeated tunnel request idle timeouts", { requestId: id, mappingId: item.mappingId });
+      }
+    }
   };
   return {
     timer: setTimeout(timeout, config.requestTimeoutMs),
@@ -293,6 +323,11 @@ async function handleMappedRequest(mapping, req, res) {
     pending.get(id)?.resetTimer();
     void sendToClient({ type: "request-error", id, error: error.message });
   });
+  res.on("close", () => {
+    if (!pending.has(id) || res.writableEnded) return;
+    finishPending(id, "downstream response closed");
+    void sendToClient({ type: "request-error", id, error: "downstream response closed" });
+  });
 }
 
 async function sendToClientBinary(payload) {
@@ -341,13 +376,16 @@ async function endResponse(payload) {
   }
   if (payload.error) item.res.end(payload.error);
   else item.res.end();
+  if (!payload.error) resetClientRequestIdleTimeouts();
   finishPending(payload.id, payload.error || "");
 }
 
 function failPending(error) {
   for (const [id, item] of pending.entries()) {
-    item.res.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
-    item.res.end(error);
+    if (!item.res.writableEnded) {
+      if (!item.res.headersSent) item.res.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
+      item.res.end(error);
+    }
     finishPending(id, error);
   }
 }
@@ -538,6 +576,7 @@ server.on("upgrade", (req, socket, head) => {
       ws.clientId = clientId || "client";
       ws.connectedAt = new Date().toISOString();
       ws.awaitingPong = false;
+      ws.requestIdleTimeouts = 0;
       ws.lastPongAt = "";
       ws.latencyMs = null;
       wss.emit("connection", ws, req);

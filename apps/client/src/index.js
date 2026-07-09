@@ -40,6 +40,9 @@ ensureAdmin(config);
 
 const logger = createLogger("client");
 const WS_OPEN = 1;
+const WS_CLOSING = 2;
+const RESTART_FORCE_CLOSE_MS = 1000;
+const RESTART_RESUME_MS = 2000;
 let currentWs = null;
 let reconnectNow;
 let wakeReconnectDelay;
@@ -217,11 +220,44 @@ function isConnected() {
   return currentWs?.readyState === WS_OPEN;
 }
 
-function restartConnection(reason = "connection restart requested") {
-  skipNextReconnectDelay = !wakeReconnectDelay;
-  if (currentWs) currentWs.close(4001, reason);
+function wakeConnector() {
   if (reconnectNow) reconnectNow();
   if (wakeReconnectDelay) wakeReconnectDelay();
+}
+
+function restartConnection(reason = "connection restart requested", options = {}) {
+  skipNextReconnectDelay = !wakeReconnectDelay;
+  const ws = currentWs;
+  if (!ws) {
+    wakeConnector();
+    return;
+  }
+
+  let done = false;
+  let forceTimer;
+  let resumeTimer;
+  const resume = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(forceTimer);
+    clearTimeout(resumeTimer);
+    wakeConnector();
+  };
+
+  ws.once("close", resume);
+  try {
+    if (ws.readyState === WS_OPEN || ws.readyState === WS_CLOSING) ws.close(4001, reason);
+    else ws.terminate();
+  } catch {
+    ws.terminate();
+  }
+
+  if (options.force) {
+    forceTimer = setTimeout(() => {
+      if (!done && ws.readyState !== WebSocket.CLOSED) ws.terminate();
+    }, RESTART_FORCE_CLOSE_MS);
+  }
+  resumeTimer = setTimeout(resume, options.force ? RESTART_RESUME_MS : config.reconnectMs);
 }
 
 async function waitBeforeReconnect() {
@@ -291,6 +327,14 @@ function finishActiveRequest(id, mapping, hadError = false) {
   activeRequests.delete(id);
 }
 
+function failActiveRequests(ws, errorMessage) {
+  for (const [id, active] of activeRequests.entries()) {
+    if (ws && active.ws !== ws) continue;
+    active.localReq.destroy(new Error(errorMessage));
+    finishActiveRequest(id, active.mapping, true);
+  }
+}
+
 function handleRequestStart(ws, message) {
   const mapping = findMapping(message.mappingId);
   if (!mapping || !mapping.enabled) {
@@ -349,7 +393,7 @@ function handleRequestStart(ws, message) {
     finishActiveRequest(message.id, mapping, true);
   });
 
-  const active = { mapping, localReq, hasBody, localEnded: false, idle: null, writeQueue: Promise.resolve() };
+  const active = { ws, mapping, localReq, hasBody, localEnded: false, idle: null, writeQueue: Promise.resolve() };
   active.idle = createLocalIdleTimer(ws, message.id, mapping, localReq);
   activeRequests.set(message.id, active);
   if (!hasBody) {
@@ -422,17 +466,13 @@ async function connectForever() {
         if (message.type === "request-error" && message.id) {
           const active = activeRequests.get(message.id);
           active?.localReq.destroy(new Error(message.error || "request error"));
-          if (active) {
-            const stats = statsFor(active.mapping.id);
-            stats.errorCount += 1;
-            stats.activeRequests = Math.max(0, stats.activeRequests - 1);
-          }
-          activeRequests.delete(message.id);
+          if (active) finishActiveRequest(message.id, active.mapping, true);
         }
       });
       ws.on("close", () => {
         if (currentWs === ws) {
           currentWs = null;
+          failActiveRequests(ws, "server disconnected");
           logger.warn("disconnected from server", { reconnectMs: config.reconnectMs });
         } else {
           logger.info("stale server connection closed");
@@ -519,7 +559,7 @@ const adminServer = http.createServer(async (req, res) => {
   if (routedPath === "/api/config" && req.method === "GET") return json(res, 200, { ok: true, config: publicConfig() });
   if (routedPath === "/api/config" && req.method === "PUT") return updateConfig(req, res);
   if (routedPath === "/api/restart" && req.method === "POST") {
-    restartConnection("manual restart");
+    restartConnection("manual restart", { force: true });
     logger.info("client connection restart requested", { user: currentUser(req, config) || "" });
     return json(res, 200, { ok: true });
   }
