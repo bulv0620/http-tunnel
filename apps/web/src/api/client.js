@@ -70,6 +70,7 @@ export const api = {
   status: () => request("/api/status"),
   config: () => request("/api/config"),
   saveConfig: (payload) => request("/api/config", { method: "PUT", body: JSON.stringify(payload) }),
+  restartClient: () => request("/api/restart", { method: "POST", body: "{}" }),
   createMapping: (payload) => request("/api/mappings", { method: "POST", body: JSON.stringify(payload) }),
   updateMapping: (id, payload) => request(`/api/mappings/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteMapping: (id) => request(`/api/mappings/${id}`, { method: "DELETE" })

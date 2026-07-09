@@ -41,7 +41,10 @@ export const messages = {
       maxBodyBytes: "管理 API 请求体上限",
       save: "保存配置",
       saved: "配置已保存",
-      saveFailed: "配置保存失败"
+      saveFailed: "配置保存失败",
+      restartConnection: "重启连接",
+      restartStarted: "连接重启已触发",
+      restartFailed: "连接重启失败"
     },
     dashboard: {
       serverTitle: "HTTP Tunnel Server",
@@ -153,7 +156,10 @@ export const messages = {
       maxBodyBytes: "Admin API Body Limit",
       save: "Save Config",
       saved: "Config saved",
-      saveFailed: "Failed to save config"
+      saveFailed: "Failed to save config",
+      restartConnection: "Restart Connection",
+      restartStarted: "Connection restart requested",
+      restartFailed: "Failed to restart connection"
     },
     dashboard: {
       serverTitle: "HTTP Tunnel Server",

@@ -37,7 +37,10 @@
             <el-input-number v-model="sizeValue" :min="1024" class="full-input" />
           </el-form-item>
         </div>
-        <el-button type="primary" :loading="saving" @click="save">{{ t("config.save") }}</el-button>
+        <div class="config-actions">
+          <el-button type="primary" :loading="saving" :disabled="restarting" @click="save">{{ t("config.save") }}</el-button>
+          <el-button v-if="mode === 'client'" :loading="restarting" :disabled="saving" @click="restartClient">{{ t("config.restartConnection") }}</el-button>
+        </div>
       </el-form>
     </section>
   </AppShell>
@@ -58,6 +61,7 @@ const props = defineProps({
 const error = ref("");
 const loading = ref(false);
 const saving = ref(false);
+const restarting = ref(false);
 const form = reactive({
   baseUrl: "/",
   adminUser: "admin",
@@ -126,6 +130,20 @@ async function save() {
     error.value = err.message || t("config.saveFailed");
   } finally {
     saving.value = false;
+  }
+}
+
+async function restartClient() {
+  if (restarting.value) return;
+  error.value = "";
+  restarting.value = true;
+  try {
+    await api.restartClient();
+    ElMessage.success(t("config.restartStarted"));
+  } catch (err) {
+    error.value = err.message || t("config.restartFailed");
+  } finally {
+    restarting.value = false;
   }
 }
 

@@ -582,6 +582,13 @@ select {
   margin-bottom: 14px;
 }
 
+.config-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .nowrap {
   white-space: nowrap;
 }

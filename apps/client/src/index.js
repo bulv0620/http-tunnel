@@ -1,6 +1,5 @@
 import http from "node:http";
 import crypto from "node:crypto";
-import { setTimeout as delay } from "node:timers/promises";
 import { WebSocket } from "ws";
 import { loadEnvFile } from "@http-tunnel/shared/env-file";
 import { clearSessions, ensureAdmin, requireAuth, login, logout, currentUser } from "@http-tunnel/shared/auth";
@@ -44,6 +43,8 @@ const WS_OPEN = 1;
 let currentWs = null;
 let connected = false;
 let reconnectNow;
+let wakeReconnectDelay;
+let skipNextReconnectDelay = false;
 let lastError = "";
 let lastServerPingAt = "";
 let connectorStarted = false;
@@ -116,7 +117,7 @@ function applySavedSettings(next) {
     clientId: config.clientId,
     reconnectMs: config.reconnectMs
   });
-  if (previousConnection !== currentConnection && connectorStarted) restartConnection();
+  if (previousConnection !== currentConnection && connectorStarted) restartConnection("config updated");
   return {
     redirectBaseUrl: previousBaseUrl !== config.baseUrl ? config.baseUrl : "",
     adminUserChanged: previousAdminUser !== config.adminUser
@@ -213,9 +214,28 @@ function sendMappings() {
   void sendWs(currentWs, JSON.stringify({ type: "mappings", mappings: config.mappings }));
 }
 
-function restartConnection() {
-  if (currentWs) currentWs.close(4001, "config updated");
+function restartConnection(reason = "connection restart requested") {
+  skipNextReconnectDelay = !wakeReconnectDelay;
+  if (currentWs) currentWs.close(4001, reason);
   if (reconnectNow) reconnectNow();
+  if (wakeReconnectDelay) wakeReconnectDelay();
+}
+
+async function waitBeforeReconnect() {
+  if (skipNextReconnectDelay) {
+    skipNextReconnectDelay = false;
+    return;
+  }
+  let wake;
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, config.reconnectMs);
+    wake = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    wakeReconnectDelay = wake;
+  });
+  if (wakeReconnectDelay === wake) wakeReconnectDelay = null;
 }
 
 function startConnector() {
@@ -422,7 +442,8 @@ async function connectForever() {
       });
     });
 
-    await delay(config.reconnectMs);
+    reconnectNow = null;
+    await waitBeforeReconnect();
   }
 }
 
@@ -489,6 +510,11 @@ const adminServer = http.createServer(async (req, res) => {
   if (routedPath === "/api/status") return json(res, 200, statusPayload(req));
   if (routedPath === "/api/config" && req.method === "GET") return json(res, 200, { ok: true, config: publicConfig() });
   if (routedPath === "/api/config" && req.method === "PUT") return updateConfig(req, res);
+  if (routedPath === "/api/restart" && req.method === "POST") {
+    restartConnection("manual restart");
+    logger.info("client connection restart requested", { user: currentUser(req, config) || "" });
+    return json(res, 200, { ok: true });
+  }
 
   if (routedPath === "/api/mappings" && req.method === "POST") {
     try {
