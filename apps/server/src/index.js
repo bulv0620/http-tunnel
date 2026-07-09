@@ -36,6 +36,7 @@ ensureAdmin(config);
 const logger = createLogger("server");
 const WS_OPEN = 1;
 const HEARTBEAT_INTERVAL_MS = 15000;
+const HEARTBEAT_MAX_MISSES = 4;
 const pending = new Map();
 const mappingServers = new Map();
 const mappingSpecs = new Map();
@@ -325,6 +326,11 @@ function closeClient(code, reason) {
   client.close(code, reason);
 }
 
+function markClientAlive(ws) {
+  ws.isAlive = true;
+  ws.missedHeartbeats = 0;
+}
+
 function applySavedSettings(next) {
   const wasConfigured = isConfigured(config);
   const previousBaseUrl = config.baseUrl;
@@ -478,6 +484,7 @@ server.on("upgrade", (req, socket, head) => {
       ws.clientId = clientId || "client";
       ws.connectedAt = new Date().toISOString();
       ws.isAlive = true;
+      ws.missedHeartbeats = 0;
       ws.lastPongAt = "";
       ws.latencyMs = null;
       wss.emit("connection", ws, req);
@@ -495,13 +502,14 @@ wss.on("connection", (ws) => {
   addAuditLog("client_connected", { actor: ws.clientId, data: { clientId: ws.clientId } });
 
   ws.on("pong", (payload) => {
-    ws.isAlive = true;
+    markClientAlive(ws);
     const sentAt = Number(payload.toString());
     if (Number.isFinite(sentAt)) ws.latencyMs = Date.now() - sentAt;
     ws.lastPongAt = new Date().toISOString();
   });
 
   ws.on("message", (raw, isBinary) => {
+    markClientAlive(ws);
     if (isBinary) {
       const frame = decodeFrame(raw);
       if (frame?.type === FRAME.RESPONSE_BODY) void writeResponseBody(frame.id, frame.chunk);
@@ -537,9 +545,23 @@ wss.on("connection", (ws) => {
 setInterval(() => {
   if (!client || client.readyState !== WS_OPEN) return;
   if (client.isAlive === false) {
-    logger.warn("client heartbeat timed out", { clientId: client.clientId });
-    client.terminate();
-    return;
+    client.missedHeartbeats = (client.missedHeartbeats || 0) + 1;
+    if (client.missedHeartbeats >= HEARTBEAT_MAX_MISSES) {
+      logger.warn("client heartbeat timed out", {
+        clientId: client.clientId,
+        missedHeartbeats: client.missedHeartbeats,
+        timeoutMs: HEARTBEAT_INTERVAL_MS * HEARTBEAT_MAX_MISSES
+      });
+      client.terminate();
+      return;
+    }
+    logger.warn("client heartbeat delayed", {
+      clientId: client.clientId,
+      missedHeartbeats: client.missedHeartbeats,
+      maxMisses: HEARTBEAT_MAX_MISSES
+    });
+  } else {
+    client.missedHeartbeats = 0;
   }
   client.isAlive = false;
   client.ping(String(Date.now()));
