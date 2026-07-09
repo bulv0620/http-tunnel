@@ -35,8 +35,8 @@ ensureAdmin(config);
 
 const logger = createLogger("server");
 const WS_OPEN = 1;
-const HEARTBEAT_INTERVAL_MS = 15000;
-const HEARTBEAT_MAX_MISSES = 4;
+const HEARTBEAT_IDLE_MS = 15000;
+const HEARTBEAT_TIMEOUT_MS = 60000;
 const pending = new Map();
 const mappingServers = new Map();
 const mappingSpecs = new Map();
@@ -98,9 +98,11 @@ function mappingStatusPayload() {
   }));
 }
 
-function sendMappingStatus(ws = client) {
+async function sendMappingStatus(ws = client) {
   if (!ws || ws.readyState !== WS_OPEN) return false;
-  return sendWs(ws, JSON.stringify({ type: "mapping-status", mappings: mappingStatusPayload() }));
+  const sent = await sendWs(ws, JSON.stringify({ type: "mapping-status", mappings: mappingStatusPayload() }));
+  if (sent) markClientActivity(ws);
+  return sent;
 }
 
 function stopRemovedMappings(nextMappings) {
@@ -159,9 +161,64 @@ function applyMappings(nextMappings) {
   for (const mapping of mappings) startMapping(mapping);
 }
 
+function clearClientHeartbeat(ws) {
+  clearTimeout(ws.heartbeatIdleTimer);
+  clearTimeout(ws.heartbeatTimeoutTimer);
+  ws.heartbeatIdleTimer = null;
+  ws.heartbeatTimeoutTimer = null;
+  ws.awaitingPong = false;
+}
+
+function scheduleClientHeartbeat(ws = client) {
+  if (!ws || ws.readyState !== WS_OPEN || client !== ws) return;
+  clearTimeout(ws.heartbeatIdleTimer);
+  ws.heartbeatIdleTimer = setTimeout(() => sendClientHeartbeat(ws), HEARTBEAT_IDLE_MS);
+  ws.heartbeatIdleTimer.unref?.();
+}
+
+function markClientActivity(ws = client) {
+  if (!ws || ws.readyState !== WS_OPEN || client !== ws) return;
+  ws.awaitingPong = false;
+  clearTimeout(ws.heartbeatTimeoutTimer);
+  ws.heartbeatTimeoutTimer = null;
+  scheduleClientHeartbeat(ws);
+}
+
+function sendClientHeartbeat(ws) {
+  if (!ws || ws.readyState !== WS_OPEN || client !== ws) return;
+  ws.awaitingPong = true;
+  clearTimeout(ws.heartbeatTimeoutTimer);
+  ws.heartbeatTimeoutTimer = setTimeout(() => {
+    if (!ws.awaitingPong || ws.readyState !== WS_OPEN || client !== ws) return;
+    logger.warn("client heartbeat timed out", {
+      clientId: ws.clientId,
+      idleMs: HEARTBEAT_IDLE_MS,
+      timeoutMs: HEARTBEAT_TIMEOUT_MS,
+      pending: pending.size,
+      bufferedAmount: ws.bufferedAmount
+    });
+    ws.terminate();
+  }, HEARTBEAT_TIMEOUT_MS);
+  ws.heartbeatTimeoutTimer.unref?.();
+
+  try {
+    ws.ping(String(Date.now()), (error) => {
+      if (error && client === ws) {
+        logger.warn("client heartbeat ping failed", { clientId: ws.clientId, error: error.message });
+        ws.terminate();
+      }
+    });
+  } catch (error) {
+    logger.warn("client heartbeat ping failed", { clientId: ws.clientId, error: error.message });
+    ws.terminate();
+  }
+}
+
 async function sendToClient(payload) {
   if (!client || client.readyState !== WS_OPEN) return false;
-  return sendWs(client, JSON.stringify(payload));
+  const sent = await sendWs(client, JSON.stringify(payload));
+  if (sent) markClientActivity(client);
+  return sent;
 }
 
 function finishPending(id, errorMessage = "") {
@@ -240,7 +297,9 @@ async function handleMappedRequest(mapping, req, res) {
 
 async function sendToClientBinary(payload) {
   if (!client || client.readyState !== WS_OPEN) return false;
-  return sendWs(client, payload, { binary: true });
+  const sent = await sendWs(client, payload, { binary: true });
+  if (sent) markClientActivity(client);
+  return sent;
 }
 
 function startResponse(payload) {
@@ -324,11 +383,6 @@ function publicConfig() {
 function closeClient(code, reason) {
   if (!client || client.readyState !== WS_OPEN) return;
   client.close(code, reason);
-}
-
-function markClientAlive(ws) {
-  ws.isAlive = true;
-  ws.missedHeartbeats = 0;
 }
 
 function applySavedSettings(next) {
@@ -483,8 +537,7 @@ server.on("upgrade", (req, socket, head) => {
     wss.handleUpgrade(req, socket, head, (ws) => {
       ws.clientId = clientId || "client";
       ws.connectedAt = new Date().toISOString();
-      ws.isAlive = true;
-      ws.missedHeartbeats = 0;
+      ws.awaitingPong = false;
       ws.lastPongAt = "";
       ws.latencyMs = null;
       wss.emit("connection", ws, req);
@@ -498,18 +551,19 @@ server.on("upgrade", (req, socket, head) => {
 wss.on("connection", (ws) => {
   clientUpgradeInProgress = false;
   client = ws;
+  markClientActivity(ws);
   logger.info("client connected", { clientId: ws.clientId });
   addAuditLog("client_connected", { actor: ws.clientId, data: { clientId: ws.clientId } });
 
   ws.on("pong", (payload) => {
-    markClientAlive(ws);
+    markClientActivity(ws);
     const sentAt = Number(payload.toString());
     if (Number.isFinite(sentAt)) ws.latencyMs = Date.now() - sentAt;
     ws.lastPongAt = new Date().toISOString();
   });
 
   ws.on("message", (raw, isBinary) => {
-    markClientAlive(ws);
+    markClientActivity(ws);
     if (isBinary) {
       const frame = decodeFrame(raw);
       if (frame?.type === FRAME.RESPONSE_BODY) void writeResponseBody(frame.id, frame.chunk);
@@ -535,37 +589,13 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
+    clearClientHeartbeat(ws);
     if (client === ws) client = null;
     failPending("client disconnected");
     logger.warn("client disconnected", { clientId: ws.clientId });
     addAuditLog("client_disconnected", { actor: ws.clientId, data: { clientId: ws.clientId } });
   });
 });
-
-setInterval(() => {
-  if (!client || client.readyState !== WS_OPEN) return;
-  if (client.isAlive === false) {
-    client.missedHeartbeats = (client.missedHeartbeats || 0) + 1;
-    if (client.missedHeartbeats >= HEARTBEAT_MAX_MISSES) {
-      logger.warn("client heartbeat timed out", {
-        clientId: client.clientId,
-        missedHeartbeats: client.missedHeartbeats,
-        timeoutMs: HEARTBEAT_INTERVAL_MS * HEARTBEAT_MAX_MISSES
-      });
-      client.terminate();
-      return;
-    }
-    logger.warn("client heartbeat delayed", {
-      clientId: client.clientId,
-      missedHeartbeats: client.missedHeartbeats,
-      maxMisses: HEARTBEAT_MAX_MISSES
-    });
-  } else {
-    client.missedHeartbeats = 0;
-  }
-  client.isAlive = false;
-  client.ping(String(Date.now()));
-}, HEARTBEAT_INTERVAL_MS).unref();
 
 server.listen(listenConfig.port, listenConfig.host, () => {
   logger.info("server listening", { host: listenConfig.host, port: listenConfig.port });

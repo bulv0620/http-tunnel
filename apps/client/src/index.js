@@ -41,7 +41,6 @@ ensureAdmin(config);
 const logger = createLogger("client");
 const WS_OPEN = 1;
 let currentWs = null;
-let connected = false;
 let reconnectNow;
 let wakeReconnectDelay;
 let skipNextReconnectDelay = false;
@@ -214,6 +213,10 @@ function sendMappings() {
   void sendWs(currentWs, JSON.stringify({ type: "mappings", mappings: config.mappings }));
 }
 
+function isConnected() {
+  return currentWs?.readyState === WS_OPEN;
+}
+
 function restartConnection(reason = "connection restart requested") {
   skipNextReconnectDelay = !wakeReconnectDelay;
   if (currentWs) currentWs.close(4001, reason);
@@ -246,12 +249,12 @@ function startConnector() {
 
 function mappingStatus(mapping) {
   if (!mapping.enabled) return "disabled";
-  if (!connected) return "disconnected";
+  if (!isConnected()) return "disconnected";
   return remoteMappingStatuses.get(mapping.id)?.status || "connected";
 }
 
 function mappingStatusMessage(mapping) {
-  if (!connected) return "";
+  if (!isConnected()) return "";
   return remoteMappingStatuses.get(mapping.id)?.statusMessage || "";
 }
 
@@ -388,7 +391,6 @@ async function connectForever() {
       reconnectNow = resolve;
 
       ws.on("open", () => {
-        connected = true;
         lastError = "";
         logger.info("connected to server", { serverUrl: url.origin + url.pathname, mappings: config.mappings.length });
         void sendWs(ws, JSON.stringify({ type: "hello", mappings: config.mappings }));
@@ -429,15 +431,21 @@ async function connectForever() {
         }
       });
       ws.on("close", () => {
-        connected = false;
-        if (currentWs === ws) currentWs = null;
-        logger.warn("disconnected from server", { reconnectMs: config.reconnectMs });
+        if (currentWs === ws) {
+          currentWs = null;
+          logger.warn("disconnected from server", { reconnectMs: config.reconnectMs });
+        } else {
+          logger.info("stale server connection closed");
+        }
         resolve();
       });
       ws.on("error", (error) => {
-        connected = false;
-        lastError = error.message;
-        logger.error("connection error", { error: error.message });
+        if (currentWs === ws) {
+          lastError = error.message;
+          logger.error("connection error", { error: error.message });
+        } else {
+          logger.info("stale server connection error ignored", { error: error.message });
+        }
         ws.close();
       });
     });
@@ -454,7 +462,7 @@ function statusPayload(req) {
     app: "client",
     user: currentUser(req, config) ? { username: config.adminUser } : null,
     config: publicConfig(),
-    connected,
+    connected: isConnected(),
     lastError,
     lastServerPingAt,
     mappings: config.mappings.map((mapping) => ({ ...mapping, status: mappingStatus(mapping), statusMessage: mappingStatusMessage(mapping), stats: updateRates(statsFor(mapping.id)) })),
