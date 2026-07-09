@@ -35,6 +35,7 @@ ensureAdmin(config);
 
 const logger = createLogger("server");
 const WS_OPEN = 1;
+const HEARTBEAT_INTERVAL_MS = 15000;
 const pending = new Map();
 const mappingServers = new Map();
 const mappingSpecs = new Map();
@@ -476,6 +477,7 @@ server.on("upgrade", (req, socket, head) => {
     wss.handleUpgrade(req, socket, head, (ws) => {
       ws.clientId = clientId || "client";
       ws.connectedAt = new Date().toISOString();
+      ws.isAlive = true;
       ws.lastPongAt = "";
       ws.latencyMs = null;
       wss.emit("connection", ws, req);
@@ -493,6 +495,7 @@ wss.on("connection", (ws) => {
   addAuditLog("client_connected", { actor: ws.clientId, data: { clientId: ws.clientId } });
 
   ws.on("pong", (payload) => {
+    ws.isAlive = true;
     const sentAt = Number(payload.toString());
     if (Number.isFinite(sentAt)) ws.latencyMs = Date.now() - sentAt;
     ws.lastPongAt = new Date().toISOString();
@@ -533,8 +536,14 @@ wss.on("connection", (ws) => {
 
 setInterval(() => {
   if (!client || client.readyState !== WS_OPEN) return;
+  if (client.isAlive === false) {
+    logger.warn("client heartbeat timed out", { clientId: client.clientId });
+    client.terminate();
+    return;
+  }
+  client.isAlive = false;
   client.ping(String(Date.now()));
-}, 15000).unref();
+}, HEARTBEAT_INTERVAL_MS).unref();
 
 server.listen(listenConfig.port, listenConfig.host, () => {
   logger.info("server listening", { host: listenConfig.host, port: listenConfig.port });
