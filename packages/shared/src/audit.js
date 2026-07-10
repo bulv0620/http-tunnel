@@ -1,5 +1,5 @@
-export function clientIp(req) {
-  const forwarded = req.headers["x-forwarded-for"];
+export function clientIp(req, trustProxy = false) {
+  const forwarded = trustProxy ? req.headers["x-forwarded-for"] : "";
   if (forwarded) return String(forwarded).split(",")[0].trim();
   return req.socket?.remoteAddress || "";
 }

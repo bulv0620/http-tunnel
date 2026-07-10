@@ -16,12 +16,18 @@ const FETCH_DECODED_HEADERS = new Set([
 
 export function toHeaderObject(headers) {
   const output = {};
+  const connectionHeaders = new Set(
+    String(headers.connection || "")
+      .split(",")
+      .map((name) => name.trim().toLowerCase())
+      .filter(Boolean)
+  );
   for (const [name, value] of Object.entries(headers)) {
     const key = name.toLowerCase();
-    if (HOP_BY_HOP_HEADERS.has(key)) continue;
+    if (HOP_BY_HOP_HEADERS.has(key) || connectionHeaders.has(key)) continue;
     if (key.startsWith("sec-websocket-")) continue;
     if (typeof value === "undefined") continue;
-    output[key] = Array.isArray(value) ? value.join(", ") : String(value);
+    output[key] = Array.isArray(value) ? value.map(String) : String(value);
   }
   return output;
 }

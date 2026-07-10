@@ -31,7 +31,7 @@ packages/shared  server/client 共享代码
 
 ## 配置与数据
 
-环境变量只负责监听地址：
+监听地址和运行时安全/资源限制通过环境变量配置：
 
 ```env
 # .env.server
@@ -41,7 +41,24 @@ PORT=12400
 # .env.client
 ADMIN_HOST=0.0.0.0
 ADMIN_PORT=12500
+
+# 可选：逗号分隔的跨域管理前端来源；默认只允许同源
+CORS_ORIGINS=http://localhost:5173
+
+# 仅在服务只通过可信反向代理访问时开启
+TRUST_PROXY=false
+SECURE_COOKIES=false
+
+# 会话与资源保护默认值
+SESSION_TTL_MS=43200000
+MAX_SESSIONS=1000
+MAX_CONCURRENT_REQUESTS=256
+MAX_CONCURRENT_REQUESTS_PER_MAPPING=64
+MAX_WS_PAYLOAD_BYTES=2097152
+MAX_HEADER_BYTES=16384
 ```
+
+`TRUST_PROXY=true` 后才会信任 `X-Forwarded-For` 和 `X-Forwarded-Proto`。如果管理页面与 API 不同源，必须把完整 Origin 加入 `CORS_ORIGINS`；不要配置不受信任的来源。
 
 业务配置和映射数据存到 SQLite：
 

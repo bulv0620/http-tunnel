@@ -14,6 +14,7 @@
     "./logger": "./src/logger.js",
     "./mappings": "./src/mappings.js",
     "./password": "./src/password.js",
+    "./runtime-config": "./src/runtime-config.js",
     "./static-web": "./src/static-web.js",
     "./stream-protocol": "./src/stream-protocol.js",
     "./validators": "./src/validators.js"

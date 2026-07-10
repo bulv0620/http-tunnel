@@ -16,22 +16,32 @@ import { json, readJson, toHeaderObject } from "@http-tunnel/shared/http-utils";
 import { createLogger } from "@http-tunnel/shared/logger";
 import { normalizeMappings } from "@http-tunnel/shared/mappings";
 import { hashPassword } from "@http-tunnel/shared/password";
+import { envBoolean, envList, envPositiveInteger } from "@http-tunnel/shared/runtime-config";
 import { serveStaticWeb } from "@http-tunnel/shared/static-web";
-import { FRAME, createRequestId, decodeFrame, encodeFrame, sendWs, writeStream } from "@http-tunnel/shared/stream-protocol";
+import { FRAME, createRequestId, decodeFrame, encodeFrame, isRequestId, sendWs, writeStream } from "@http-tunnel/shared/stream-protocol";
 
 loadEnvFile(".env.server");
 
 const listenConfig = {
   host: process.env.HOST || "0.0.0.0",
-  port: Number(process.env.PORT || 12400)
+  port: Number(process.env.PORT || 12400),
+  corsOrigins: envList("CORS_ORIGINS"),
+  trustProxy: envBoolean("TRUST_PROXY"),
+  secureCookies: envBoolean("SECURE_COOKIES"),
+  sessionTtlMs: envPositiveInteger("SESSION_TTL_MS", 12 * 60 * 60 * 1000),
+  maxSessions: envPositiveInteger("MAX_SESSIONS", 1000),
+  maxConcurrentRequests: envPositiveInteger("MAX_CONCURRENT_REQUESTS", 256),
+  maxConcurrentRequestsPerMapping: envPositiveInteger("MAX_CONCURRENT_REQUESTS_PER_MAPPING", 64),
+  maxWsPayloadBytes: envPositiveInteger("MAX_WS_PAYLOAD_BYTES", 2 * 1024 * 1024),
+  maxHeaderBytes: envPositiveInteger("MAX_HEADER_BYTES", 16 * 1024)
 };
 const config = {
   ...listenConfig,
   ...loadSettings(),
-  loginRateLimiter: createLoginRateLimiter(),
+  loginRateLimiter: createLoginRateLimiter({ trustProxy: listenConfig.trustProxy }),
   audit(event, data = {}, req) {
     const actor = data.username || currentUser(req, config) || "";
-    addAuditLog(event, { actor, ip: data.ip || (req ? clientIp(req) : ""), data });
+    addAuditLog(event, { actor, ip: data.ip || (req ? clientIp(req, config.trustProxy) : ""), data });
   },
   upgradePassword(password) {
     Object.assign(config, saveSettings({ ...publicConfig(), adminPassword: hashPassword(password) }));
@@ -123,7 +133,7 @@ function stopRemovedMappings(nextMappings) {
 
 function startMapping(mapping) {
   if (!mapping.enabled || mappingServers.has(mapping.id)) return;
-  const server = http.createServer((req, res) => handleMappedRequest(mapping, req, res));
+  const server = http.createServer({ maxHeaderSize: config.maxHeaderBytes }, (req, res) => handleMappedRequest(mapping, req, res));
   mappingListenErrors.delete(mapping.id);
   server.on("error", (error) => {
     mappingListenErrors.set(mapping.id, error.message);
@@ -295,12 +305,26 @@ function finishPending(id, errorMessage = "") {
   return item;
 }
 
+function failHttpResponse(res, statusCode, errorMessage) {
+  if (res.writableEnded || res.destroyed) return;
+  if (!res.headersSent) {
+    res.writeHead(statusCode, { "content-type": "text/plain; charset=utf-8" });
+    res.end(errorMessage);
+    return;
+  }
+  res.destroy(new Error(errorMessage));
+}
+
+function cancelClientRequest(id, errorMessage) {
+  void sendToClient({ type: "request-error", id, error: errorMessage });
+}
+
 function createIdleTimer(id, res) {
   const timeout = () => {
     const item = finishPending(id, "tunnel request idle timed out");
     if (!item) return;
-    if (!res.headersSent) res.writeHead(504, { "content-type": "text/plain; charset=utf-8" });
-    res.end("tunnel request idle timed out");
+    cancelClientRequest(id, "tunnel request idle timed out");
+    failHttpResponse(res, 504, "tunnel request idle timed out");
     logger.warn("tunnel request idle timed out", {
       clientId: isClientConnected() ? client.clientId : "",
       requestId: id,
@@ -322,11 +346,20 @@ async function handleMappedRequest(mapping, req, res) {
     return;
   }
 
-  const id = createRequestId();
   const stats = statsFor(mapping.id);
   stats.requestCount += 1;
-  stats.activeRequests += 1;
   stats.lastAccessAt = new Date().toISOString();
+  if (
+    pending.size >= config.maxConcurrentRequests ||
+    stats.activeRequests >= config.maxConcurrentRequestsPerMapping
+  ) {
+    stats.errorCount += 1;
+    json(res, 503, { ok: false, error: "tunnel concurrency limit reached" });
+    return;
+  }
+
+  const id = createRequestId();
+  stats.activeRequests += 1;
   const idle = createIdleTimer(id, res);
   pending.set(id, { res, idle, resetTimer: () => idle.reset(), mappingId: mapping.id, responded: false, writeQueue: Promise.resolve() });
   const sent = await sendToClient({
@@ -345,26 +378,34 @@ async function handleMappedRequest(mapping, req, res) {
 
   req.on("data", async (chunk) => {
     req.pause();
+    if (!pending.has(id)) {
+      req.destroy();
+      return;
+    }
     pending.get(id)?.resetTimer();
     stats.bytesIn += chunk.length;
     if (!(await sendToClientBinary(encodeFrame(FRAME.REQUEST_BODY, id, chunk)))) {
+      const item = finishPending(id, "client is not connected");
+      if (item) failHttpResponse(item.res, 502, "client is not connected");
       req.destroy();
       return;
     }
     req.resume();
   });
   req.on("end", () => {
+    if (!pending.has(id)) return;
     pending.get(id)?.resetTimer();
     void sendToClient({ type: "request-end", id });
   });
   req.on("error", (error) => {
+    if (!pending.has(id)) return;
     pending.get(id)?.resetTimer();
-    void sendToClient({ type: "request-error", id, error: error.message });
+    cancelClientRequest(id, error.message);
   });
   res.on("close", () => {
     if (!pending.has(id) || res.writableEnded) return;
     finishPending(id, "downstream response closed");
-    void sendToClient({ type: "request-error", id, error: "downstream response closed" });
+    cancelClientRequest(id, "downstream response closed");
   });
 }
 
@@ -381,9 +422,8 @@ function startResponse(payload) {
   item.resetTimer();
 
   if (payload.error) {
-    item.res.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
-    item.res.end(payload.error);
     finishPending(payload.id, payload.error);
+    failHttpResponse(item.res, 502, payload.error);
     return;
   }
 
@@ -397,8 +437,12 @@ async function writeResponseBody(id, chunk) {
   if (!item || !item.responded) return;
   item.resetTimer();
   item.writeQueue = item.writeQueue.then(async () => {
+    if (!pending.has(id)) return;
     statsFor(item.mappingId).bytesOut += chunk.length;
-    await writeStream(item.res, chunk);
+    if (!(await writeStream(item.res, chunk))) {
+      finishPending(id, "downstream response closed");
+      cancelClientRequest(id, "downstream response closed");
+    }
   });
   await item.writeQueue;
 }
@@ -412,16 +456,15 @@ async function endResponse(payload) {
   if (!item.responded) {
     item.res.writeHead(payload.error ? 502 : 200, { "content-type": "text/plain; charset=utf-8" });
   }
-  if (payload.error) item.res.end(payload.error);
-  else item.res.end();
   finishPending(payload.id, payload.error || "");
+  if (payload.error) failHttpResponse(item.res, 502, payload.error);
+  else item.res.end();
 }
 
 function failPending(error) {
   for (const [id, item] of pending.entries()) {
     if (!item.res.writableEnded) {
-      if (!item.res.headersSent) item.res.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
-      item.res.end(error);
+      failHttpResponse(item.res, 502, error);
     }
     finishPending(id, error);
   }
@@ -443,6 +486,11 @@ function statusPayload(req) {
     } : null,
     mappings: mappings.map((mapping) => ({ ...mapping, status: mappingStatus(mapping), statusMessage: mappingStatusMessage(mapping), stats: updateRates(statsFor(mapping.id)) })),
     pending: pending.size,
+    limits: {
+      maxConcurrentRequests: config.maxConcurrentRequests,
+      maxConcurrentRequestsPerMapping: config.maxConcurrentRequestsPerMapping,
+      maxWsPayloadBytes: config.maxWsPayloadBytes
+    },
     logs: logger.entries,
     auditLogs: listAuditLogs(100)
   };
@@ -495,7 +543,7 @@ async function setup(req, res) {
       maxBodyBytes: body.maxBodyBytes
     }));
     logger.info("server configured", { baseUrl: config.baseUrl });
-    addAuditLog("server_configured", { actor: body.adminUser, ip: clientIp(req), data: { baseUrl: config.baseUrl, tunnelToken: redact(config.tunnelToken) } });
+    addAuditLog("server_configured", { actor: body.adminUser, ip: clientIp(req, config.trustProxy), data: { baseUrl: config.baseUrl, tunnelToken: redact(config.tunnelToken) } });
     json(res, 200, { ok: true, app: "server", configured: true, ...result });
   } catch (error) {
     json(res, 400, { ok: false, error: error.message });
@@ -517,16 +565,16 @@ async function updateConfig(req, res) {
     }));
     if (shouldClearSessions || result.adminUserChanged) clearSessions();
     logger.info("server config updated", { baseUrl: config.baseUrl });
-    addAuditLog("server_config_updated", { actor, ip: clientIp(req), data: { baseUrl: config.baseUrl, tunnelToken: redact(config.tunnelToken) } });
+    addAuditLog("server_config_updated", { actor, ip: clientIp(req, config.trustProxy), data: { baseUrl: config.baseUrl, tunnelToken: redact(config.tunnelToken) } });
     json(res, 200, { ok: true, config: publicConfig(), ...result });
   } catch (error) {
     json(res, 400, { ok: false, error: error.message });
   }
 }
 
-const server = http.createServer(async (req, res) => {
+const server = http.createServer({ maxHeaderSize: config.maxHeaderBytes }, async (req, res) => {
   const url = new URL(req.url, "http://localhost");
-  if (applyCors(req, res)) return;
+  if (applyCors(req, res, { allowedOrigins: config.corsOrigins })) return;
   const routedPath = stripBaseUrl(url.pathname, config.baseUrl);
 
   if (url.pathname === "/healthz") return json(res, 200, { ok: true, app: "server" });
@@ -560,7 +608,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (routedPath === "/api/setup" && req.method === "POST") return setup(req, res);
   if (routedPath === "/api/auth/login" && req.method === "POST") return login(req, res, config);
-  if (routedPath === "/api/auth/logout" && req.method === "POST") return logout(req, res);
+  if (routedPath === "/api/auth/logout" && req.method === "POST") return logout(req, res, config);
   if (!routedPath.startsWith("/api/")) {
     if (serveStaticWeb(req, res, undefined, routedPath)) return;
     return json(res, 404, { ok: false, error: "not found" });
@@ -576,7 +624,7 @@ const server = http.createServer(async (req, res) => {
   json(res, 404, { ok: false, error: "not found" });
 });
 
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: config.maxWsPayloadBytes, perMessageDeflate: false });
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url, "http://localhost");
@@ -587,7 +635,7 @@ server.on("upgrade", (req, socket, head) => {
 
   const clientId = url.searchParams.get("clientId") || "";
   const rejectTunnel = (statusCode, statusText, event, data = {}) => {
-    addAuditLog(event, { ip: clientIp(req), data: { clientId, ...data } });
+    addAuditLog(event, { ip: clientIp(req, config.trustProxy), data: { clientId, ...data } });
     socket.write(`HTTP/1.1 ${statusCode} ${statusText}\r\n\r\n`);
     socket.destroy();
   };
@@ -685,9 +733,9 @@ wss.on("connection", (ws) => {
       void sendMappingStatus(ws);
       return;
     }
-    if (payload.type === "response-start" && payload.id) startResponse(payload);
-    if (payload.type === "response-end" && payload.id) void endResponse(payload);
-    if (payload.type === "response-error" && payload.id) void endResponse(payload);
+    if (payload.type === "response-start" && isRequestId(payload.id)) startResponse(payload);
+    if (payload.type === "response-end" && isRequestId(payload.id)) void endResponse(payload);
+    if (payload.type === "response-error" && isRequestId(payload.id)) void endResponse(payload);
   });
 
   ws.on("error", (error) => {

@@ -2,7 +2,7 @@ import http from "node:http";
 import crypto from "node:crypto";
 import { WebSocket } from "ws";
 import { loadEnvFile } from "@http-tunnel/shared/env-file";
-import { clearSessions, ensureAdmin, requireAuth, login, logout, currentUser } from "@http-tunnel/shared/auth";
+import { clearSessions, createLoginRateLimiter, ensureAdmin, requireAuth, login, logout, currentUser } from "@http-tunnel/shared/auth";
 import { stripBaseUrl } from "@http-tunnel/shared/base-url";
 import { applyCors } from "@http-tunnel/shared/cors";
 import {
@@ -24,20 +24,31 @@ import { json, readJson, toHeaderObject } from "@http-tunnel/shared/http-utils";
 import { createLogger } from "@http-tunnel/shared/logger";
 import { mappingTarget } from "@http-tunnel/shared/mappings";
 import { hashPassword } from "@http-tunnel/shared/password";
+import { envBoolean, envList, envPositiveInteger } from "@http-tunnel/shared/runtime-config";
 import { serveStaticWeb } from "@http-tunnel/shared/static-web";
-import { FRAME, decodeFrame, encodeFrame, sendWs, writeStream } from "@http-tunnel/shared/stream-protocol";
+import { FRAME, decodeFrame, encodeFrame, isRequestId, sendWs, writeStream } from "@http-tunnel/shared/stream-protocol";
 import { validatePort } from "@http-tunnel/shared/validators";
 
 loadEnvFile(".env.client");
 
 const listenConfig = {
   adminHost: process.env.ADMIN_HOST || "0.0.0.0",
-  adminPort: Number(process.env.ADMIN_PORT || 12500)
+  adminPort: Number(process.env.ADMIN_PORT || 12500),
+  corsOrigins: envList("CORS_ORIGINS"),
+  trustProxy: envBoolean("TRUST_PROXY"),
+  secureCookies: envBoolean("SECURE_COOKIES"),
+  sessionTtlMs: envPositiveInteger("SESSION_TTL_MS", 12 * 60 * 60 * 1000),
+  maxSessions: envPositiveInteger("MAX_SESSIONS", 1000),
+  maxConcurrentRequests: envPositiveInteger("MAX_CONCURRENT_REQUESTS", 256),
+  maxConcurrentRequestsPerMapping: envPositiveInteger("MAX_CONCURRENT_REQUESTS_PER_MAPPING", 64),
+  maxWsPayloadBytes: envPositiveInteger("MAX_WS_PAYLOAD_BYTES", 2 * 1024 * 1024),
+  maxHeaderBytes: envPositiveInteger("MAX_HEADER_BYTES", 16 * 1024)
 };
 const config = {
   ...listenConfig,
   ...loadSettings(),
   mappings: listMappings(),
+  loginRateLimiter: createLoginRateLimiter({ trustProxy: listenConfig.trustProxy }),
   upgradePassword(password) {
     Object.assign(config, saveSettings({ ...publicConfig(), adminPassword: hashPassword(password) }));
   }
@@ -391,12 +402,12 @@ function sendResponseError(ws, id, error) {
   void sendWs(ws, JSON.stringify({ type: "response-error", id, error }));
 }
 
-function createLocalIdleTimer(ws, id, mapping, localReq) {
+function createLocalIdleTimer(ws, id, mapping, active) {
   const timeout = () => {
     if (!activeRequests.has(id)) return;
     sendResponseError(ws, id, "local request idle timed out");
     finishActiveRequest(id, mapping, true);
-    localReq.destroy(new Error("local request idle timed out"));
+    destroyActiveRequest(active, "local request idle timed out");
   };
   return {
     timer: setTimeout(timeout, config.requestTimeoutMs),
@@ -416,10 +427,16 @@ function finishActiveRequest(id, mapping, hadError = false) {
   activeRequests.delete(id);
 }
 
+function destroyActiveRequest(active, errorMessage) {
+  const error = new Error(errorMessage);
+  active.localRes?.destroy(error);
+  active.localReq.destroy(error);
+}
+
 function failActiveRequests(ws, errorMessage) {
   for (const [id, active] of activeRequests.entries()) {
     if (ws && active.ws !== ws) continue;
-    active.localReq.destroy(new Error(errorMessage));
+    destroyActiveRequest(active, errorMessage);
     finishActiveRequest(id, active.mapping, true);
   }
 }
@@ -433,8 +450,21 @@ function handleRequestStart(ws, message) {
 
   const stats = statsFor(mapping.id);
   stats.requestCount += 1;
-  stats.activeRequests += 1;
   stats.lastAccessAt = new Date().toISOString();
+  if (
+    activeRequests.size >= config.maxConcurrentRequests ||
+    stats.activeRequests >= config.maxConcurrentRequestsPerMapping
+  ) {
+    stats.errorCount += 1;
+    sendResponseError(ws, message.id, "client concurrency limit reached");
+    logger.warn("client concurrency limit reached", {
+      requestId: message.id,
+      mappingId: mapping.id,
+      activeRequests: activeRequests.size
+    });
+    return;
+  }
+  stats.activeRequests += 1;
 
   const targetUrl = new URL(message.url || "/", mappingTarget(mapping));
   const headers = toHeaderObject(message.headers || {});
@@ -446,6 +476,11 @@ function handleRequestStart(ws, message) {
     method: message.method || "GET",
     headers
   }, (localRes) => {
+    if (!activeRequests.has(message.id)) {
+      localRes.destroy();
+      return;
+    }
+    active.localRes = localRes;
     active.idle.reset();
     void sendWs(ws, JSON.stringify({
       type: "response-start",
@@ -482,8 +517,8 @@ function handleRequestStart(ws, message) {
     finishActiveRequest(message.id, mapping, true);
   });
 
-  const active = { ws, mapping, localReq, hasBody, localEnded: false, idle: null, writeQueue: Promise.resolve() };
-  active.idle = createLocalIdleTimer(ws, message.id, mapping, localReq);
+  const active = { ws, mapping, localReq, localRes: null, hasBody, localEnded: false, idle: null, writeQueue: Promise.resolve() };
+  active.idle = createLocalIdleTimer(ws, message.id, mapping, active);
   activeRequests.set(message.id, active);
   if (!hasBody) {
     active.localEnded = true;
@@ -519,7 +554,11 @@ async function connectForever() {
     const url = buildConnectUrl();
 
     await new Promise((resolve) => {
-      const ws = new WebSocket(url, { headers: connectHeaders() });
+      const ws = new WebSocket(url, {
+        headers: connectHeaders(),
+        maxPayload: config.maxWsPayloadBytes,
+        perMessageDeflate: false
+      });
       let opened = false;
       currentWs = ws;
       reconnectNow = resolve;
@@ -556,17 +595,17 @@ async function connectForever() {
         } catch {
           return;
         }
-        if (message.type === "request-start" && message.id) handleRequestStart(ws, message);
-        if (message.type === "request-end" && message.id) handleRequestEnd(ws, message.id);
+        if (message.type === "request-start" && isRequestId(message.id)) handleRequestStart(ws, message);
+        if (message.type === "request-end" && isRequestId(message.id)) handleRequestEnd(ws, message.id);
         if (message.type === "mapping-status") {
           remoteMappingStatuses.clear();
           for (const item of message.mappings || []) {
             if (item.id) remoteMappingStatuses.set(item.id, item);
           }
         }
-        if (message.type === "request-error" && message.id) {
+        if (message.type === "request-error" && isRequestId(message.id)) {
           const active = activeRequests.get(message.id);
-          active?.localReq.destroy(new Error(message.error || "request error"));
+          if (active) destroyActiveRequest(active, message.error || "request error");
           if (active) finishActiveRequest(message.id, active.mapping, true);
         }
       });
@@ -613,6 +652,11 @@ function statusPayload(req) {
     reconnectAttempt,
     reconnectDelayMs,
     nextReconnectAt,
+    limits: {
+      maxConcurrentRequests: config.maxConcurrentRequests,
+      maxConcurrentRequestsPerMapping: config.maxConcurrentRequestsPerMapping,
+      maxWsPayloadBytes: config.maxWsPayloadBytes
+    },
     lastServerPingAt,
     lastServerActivityAt: lastServerActivityAt ? new Date(lastServerActivityAt).toISOString() : "",
     mappings: config.mappings.map((mapping) => ({ ...mapping, status: mappingStatus(mapping), statusMessage: mappingStatusMessage(mapping), stats: updateRates(statsFor(mapping.id)) })),
@@ -620,9 +664,9 @@ function statusPayload(req) {
   };
 }
 
-const adminServer = http.createServer(async (req, res) => {
+const adminServer = http.createServer({ maxHeaderSize: config.maxHeaderBytes }, async (req, res) => {
   const url = new URL(req.url, "http://localhost");
-  if (applyCors(req, res)) return;
+  if (applyCors(req, res, { allowedOrigins: config.corsOrigins })) return;
   const routedPath = stripBaseUrl(url.pathname, config.baseUrl);
 
   if (url.pathname === "/healthz") return json(res, 200, { ok: true, app: "client" });
@@ -656,7 +700,7 @@ const adminServer = http.createServer(async (req, res) => {
   }
   if (routedPath === "/api/setup" && req.method === "POST") return setup(req, res);
   if (routedPath === "/api/auth/login" && req.method === "POST") return login(req, res, config);
-  if (routedPath === "/api/auth/logout" && req.method === "POST") return logout(req, res);
+  if (routedPath === "/api/auth/logout" && req.method === "POST") return logout(req, res, config);
   if (!routedPath.startsWith("/api/")) {
     if (serveStaticWeb(req, res, undefined, routedPath)) return;
     return json(res, 404, { ok: false, error: "not found" });

@@ -29,14 +29,14 @@ The project intentionally supports only:
 Server:
 
 ```text
-HOST=127.0.0.1
+HOST=0.0.0.0
 PORT=12400
 ```
 
 Client:
 
 ```text
-ADMIN_HOST=127.0.0.1
+ADMIN_HOST=0.0.0.0
 ADMIN_PORT=12500
 ```
 
@@ -48,7 +48,21 @@ Local env files exist:
 .env.web
 ```
 
-Current design keeps env usage minimal. Business settings are stored in SQLite after first-run setup.
+Business settings are stored in SQLite after first-run setup. Operational security and resource limits are environment-driven:
+
+```text
+CORS_ORIGINS                         empty; same-origin only
+TRUST_PROXY                          false
+SECURE_COOKIES                       false
+SESSION_TTL_MS                       43200000
+MAX_SESSIONS                         1000
+MAX_CONCURRENT_REQUESTS              256
+MAX_CONCURRENT_REQUESTS_PER_MAPPING  64
+MAX_WS_PAYLOAD_BYTES                 2097152
+MAX_HEADER_BYTES                     16384
+```
+
+Environment parsing is centralized in `packages/shared/src/runtime-config.js` and fails fast for invalid booleans or positive integers.
 
 ## Data Storage
 
@@ -63,7 +77,14 @@ These files are ignored by git.
 
 The app creates the `db` directories automatically on startup.
 
-Docker compose currently does not mount database volumes by default. This is intentional: deleting and recreating a container resets setup state. If persistence is required later, add a compose volume manually.
+All provided Docker compose files bind-mount the corresponding host DB directory:
+
+```text
+../../db/server -> /app/apps/server/db
+../../db/client -> /app/apps/client/db
+```
+
+Recreating a container therefore preserves setup state. To reset setup, stop the container and explicitly remove the corresponding host DB directory/file.
 
 ## Web App
 
@@ -131,7 +152,15 @@ First run:
 - setup saves admin credentials and tunnel config into SQLite
 - passwords are hashed before being stored
 
-The server has login failure rate limiting in shared auth code.
+Both server and client have login failure rate limiting in shared auth code. Sessions have a 12-hour default lifetime and a default maximum of 1000 entries. The oldest session is removed when the cap is reached.
+
+Admin HTTP security rules:
+
+- CORS is same-origin by default; cross-origin admin frontends must be explicitly listed in `CORS_ORIGINS`.
+- Never restore reflective arbitrary-origin CORS with credentials.
+- `X-Forwarded-For` and `X-Forwarded-Proto` are ignored unless `TRUST_PROXY=true`.
+- Enable `TRUST_PROXY` only when direct access is blocked and a trusted proxy sanitizes forwarded headers.
+- Session cookies are `HttpOnly` and `SameSite=Lax`; HTTPS requests automatically receive `Secure`, and `SECURE_COOKIES=true` can force it.
 
 Relevant shared files:
 
@@ -182,6 +211,10 @@ packages/shared/src/http-utils.js
 
 The WebSocket protocol uses JSON messages for request/response metadata and binary messages for body chunks. Binary messages have a compact prefix that identifies direction and request id.
 
+Protocol messages and frames validate the 32-hex-character request id. WebSocket payloads default to a 2 MiB maximum and compression is disabled. Do not remove these checks without replacing them with equivalent resource protection.
+
+`request-error` is also the cancellation message from the server to the client. When the public caller disconnects or a tunnel request times out, the client must destroy both the local `ClientRequest` and any active local response stream. If an error occurs after public response headers were sent, destroy the HTTP response instead of appending an error string to the response body; this makes truncation visible and avoids corrupting downloads.
+
 Backpressure is handled with:
 
 ```text
@@ -192,11 +225,23 @@ writeStream()
 
 from `packages/shared/src/stream-protocol.js`.
 
+Backpressure waiting has a 30-second ceiling. Stream writes resolve on `drain`, `close`, or `error` so a closed destination cannot leave an unresolved promise.
+
+## Connection Recovery
+
+The server sends a heartbeat ping every 15 seconds. A tunnel is stale after 75 seconds without a valid heartbeat. The client checks server activity every 5 seconds.
+
+Heartbeat freshness uses the monotonic clock. If the local event loop resumes after a long pause, the peer gets a short 10-second fresh-probe window instead of an immediate stale disconnect. Preserve this distinction between peer failure and a local process pause.
+
+The client reconnects forever. Reconnect delay starts at `reconnectMs`, uses exponential backoff with jitter, and caps at 30 seconds when the configured base is lower. A successful connection or an explicit manual/config restart resets the retry state. Retry count and next retry time are exposed by the client status API and dashboard.
+
 ## Timeout Semantics
 
 `requestTimeoutMs` is an idle timeout, not a total request duration limit.
 
 Large upload/download requests should continue as long as data keeps flowing. The timeout only fires when no request or response data moves for the configured duration.
+
+An idle timeout fails and cancels only that request. It must not terminate an otherwise healthy tunnel. There is no request replay or resume after a tunnel disconnect.
 
 Default:
 
@@ -213,6 +258,12 @@ The admin API body limit is intentionally small by default:
 ```
 
 This setting is not a tunnel file size limit. It applies to JSON/admin API request bodies.
+
+## Resource Limits
+
+Both sides independently enforce global and per-mapping active-request limits. Defaults are 256 globally and 64 per mapping. The server returns `503` before creating tunnel state when its limit is reached; the client returns a `response-error` if its independent limit is reached.
+
+HTTP header size defaults to 16 KiB and WebSocket payload size defaults to 2 MiB. Hop-by-hop headers, including names nominated by the `Connection` header, are removed. Header arrays remain arrays so multiple `Set-Cookie` response headers are preserved.
 
 ## Observability
 
@@ -275,7 +326,7 @@ docker compose -f deploy/docker/compose.server-host.yml down
 docker compose -f deploy/docker/compose.server-host.yml up -d --build
 ```
 
-Because compose does not mount a DB volume by default, this resets the server setup.
+This recreates the container but preserves setup because the DB directory is bind-mounted. Remove the relevant host DB file only when an explicit setup reset is intended.
 
 ## Common Commands
 
@@ -328,21 +379,29 @@ node --check apps/server/src/index.js
 node --check apps/client/src/index.js
 ```
 
+Shared security/protocol tests:
+
+```bash
+npm test
+```
+
+The current tests cover CORS, proxy trust, login/session security, header forwarding, protocol validation, backpressure, and closed-stream behavior.
+
 ## Important Design Decisions
 
 - Do not reintroduce EJS pages. The project has moved to separated frontend/backend.
 - Frontend user-facing text should go through `apps/web/src/i18n.js`; keep `en` and `zh-CN` translations in sync.
 - Keep the current Vue/Element Plus control-center UI style consistent. Prefer shared classes in `apps/web/src/style.css` over scattered per-view styling.
-- Do not expand env config unless there is a strong reason. Most settings belong in SQLite setup/config pages.
+- Keep business settings in SQLite. Runtime-only security and resource controls belong in environment variables and should use `packages/shared/src/runtime-config.js` validation.
 - Server dashboard must not edit mappings. Mappings are controlled by the client.
 - Client should not attempt to connect to the server before first-run setup is complete.
 - Server tunnel access must remain authenticated and one-to-one. Reject extra clients; do not auto-replace the connected client.
-- Docker should remain easy to reset by default. Avoid adding DB volumes unless the user explicitly wants persistence.
+- Docker DB bind mounts are intentional. Do not remove persistence or delete host DB state during routine rebuilds.
 - README should describe the client as a generic client host, not as a NAS-specific service.
 
 ## Current Caveats
 
-- There is no full automated end-to-end tunnel test yet.
-- Docker was not verified locally in this Windows workspace because Docker may not be installed or running.
+- There is no full automated end-to-end tunnel test yet; current automated coverage is at the shared security/protocol layer.
+- Docker behavior is not part of the automated test suite.
 - For public deployment behind Nginx or Cloudflare, upstream idle/read/send timeouts can still interrupt long uploads even though the app timeout is now idle-based.
 - WebSocket fallback token in query string remains for compatibility but header auth is preferred.
