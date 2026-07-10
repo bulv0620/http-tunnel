@@ -88,6 +88,14 @@
           <strong>{{ status.config?.reconnectMs }} ms</strong>
         </div>
         <div class="connection-item">
+          <span>{{ t("dashboard.reconnectAttempt") }}</span>
+          <strong>{{ status.reconnectAttempt || 0 }}</strong>
+        </div>
+        <div class="connection-item">
+          <span>{{ t("dashboard.nextReconnectAt") }}</span>
+          <strong>{{ formatTime(status.nextReconnectAt) }}</strong>
+        </div>
+        <div class="connection-item">
           <span>{{ t("dashboard.requestTimeoutMs") }}</span>
           <strong>{{ status.config?.requestTimeoutMs }} ms</strong>
         </div>

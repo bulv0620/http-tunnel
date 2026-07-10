@@ -7,6 +7,8 @@ import { stripBaseUrl } from "@http-tunnel/shared/base-url";
 import { applyCors } from "@http-tunnel/shared/cors";
 import {
   TUNNEL_HEARTBEAT_CHECK_MS,
+  TUNNEL_HEARTBEAT_LOOP_LAG_MS,
+  TUNNEL_HEARTBEAT_RECOVERY_MS,
   TUNNEL_HEARTBEAT_STALE_MS
 } from "@http-tunnel/shared/heartbeat";
 import {
@@ -47,6 +49,8 @@ const WS_OPEN = 1;
 const WS_CLOSING = 2;
 const RESTART_FORCE_CLOSE_MS = 1000;
 const RESTART_RESUME_MS = 2000;
+const MAX_RECONNECT_DELAY_MS = 30000;
+const RECONNECT_JITTER_RATIO = 0.2;
 let currentWs = null;
 let reconnectNow;
 let wakeReconnectDelay;
@@ -54,7 +58,11 @@ let skipNextReconnectDelay = false;
 let lastError = "";
 let lastServerPingAt = "";
 let lastServerActivityAt = 0;
+let lastServerActivityMonotonicAt = 0;
 let connectorStarted = false;
+let reconnectAttempt = 0;
+let reconnectDelayMs = 0;
+let nextReconnectAt = "";
 const activeRequests = new Map();
 const mappingStats = new Map();
 const remoteMappingStatuses = new Map();
@@ -228,32 +236,53 @@ function isConnected() {
 function markServerActivity(ws = currentWs, options = {}) {
   if (!ws || currentWs !== ws) return;
   lastServerActivityAt = Date.now();
+  lastServerActivityMonotonicAt = performance.now();
   if (options.ping) lastServerPingAt = new Date().toISOString();
 }
 
 function isServerHeartbeatStale(ws = currentWs) {
   if (!ws || ws.readyState !== WS_OPEN) return false;
-  if (!lastServerActivityAt) return false;
-  return Date.now() - lastServerActivityAt >= TUNNEL_HEARTBEAT_STALE_MS;
+  if (!lastServerActivityMonotonicAt) return false;
+  return performance.now() - lastServerActivityMonotonicAt >= TUNNEL_HEARTBEAT_STALE_MS;
 }
 
 function startServerHeartbeatWatchdog(ws) {
   const check = () => {
     if (currentWs !== ws || ws.readyState !== WS_OPEN) return;
+    const now = performance.now();
+    const checkLagMs = now - ws.lastHeartbeatWatchdogAt;
+    ws.lastHeartbeatWatchdogAt = now;
     if (isServerHeartbeatStale(ws)) {
-      lastError = "server heartbeat timed out";
-      logger.warn("server heartbeat timed out", {
-        staleMs: Date.now() - lastServerActivityAt,
-        timeoutMs: TUNNEL_HEARTBEAT_STALE_MS,
-        bufferedAmount: ws.bufferedAmount
-      });
-      ws.terminate();
-      return;
+      if (checkLagMs >= TUNNEL_HEARTBEAT_CHECK_MS + TUNNEL_HEARTBEAT_LOOP_LAG_MS) {
+        lastServerActivityMonotonicAt =
+          now - TUNNEL_HEARTBEAT_STALE_MS + TUNNEL_HEARTBEAT_RECOVERY_MS;
+        logger.warn("heartbeat watchdog resumed after local event loop pause", {
+          checkLagMs: Math.round(checkLagMs),
+          recoveryMs: TUNNEL_HEARTBEAT_RECOVERY_MS
+        });
+        try {
+          ws.ping(String(Date.now()));
+        } catch (error) {
+          lastError = error.message;
+          ws.terminate();
+          return;
+        }
+      } else {
+        lastError = "server heartbeat timed out";
+        logger.warn("server heartbeat timed out", {
+          staleMs: Math.round(now - lastServerActivityMonotonicAt),
+          timeoutMs: TUNNEL_HEARTBEAT_STALE_MS,
+          bufferedAmount: ws.bufferedAmount
+        });
+        ws.terminate();
+        return;
+      }
     }
     ws.serverHeartbeatTimer = setTimeout(check, TUNNEL_HEARTBEAT_CHECK_MS);
     ws.serverHeartbeatTimer.unref?.();
   };
   clearTimeout(ws.serverHeartbeatTimer);
+  ws.lastHeartbeatWatchdogAt = performance.now();
   ws.serverHeartbeatTimer = setTimeout(check, TUNNEL_HEARTBEAT_CHECK_MS);
   ws.serverHeartbeatTimer.unref?.();
 }
@@ -303,14 +332,29 @@ function restartConnection(reason = "connection restart requested", options = {}
   resumeTimer = setTimeout(resume, options.force ? RESTART_RESUME_MS : config.reconnectMs);
 }
 
+function calculateReconnectDelay(attempt) {
+  const baseDelayMs = Math.max(1, config.reconnectMs);
+  if (attempt <= 1) return baseDelayMs;
+  const maximumDelayMs = Math.max(baseDelayMs, MAX_RECONNECT_DELAY_MS);
+  const exponentialDelayMs = Math.min(maximumDelayMs, baseDelayMs * (2 ** Math.min(attempt - 1, 10)));
+  const jitterMs = exponentialDelayMs * RECONNECT_JITTER_RATIO * Math.random();
+  return Math.round(Math.min(maximumDelayMs, exponentialDelayMs + jitterMs));
+}
+
 async function waitBeforeReconnect() {
   if (skipNextReconnectDelay) {
     skipNextReconnectDelay = false;
+    reconnectAttempt = 0;
+    reconnectDelayMs = 0;
+    nextReconnectAt = "";
     return;
   }
+  reconnectDelayMs = calculateReconnectDelay(reconnectAttempt);
+  nextReconnectAt = new Date(Date.now() + reconnectDelayMs).toISOString();
+  logger.info("reconnect scheduled", { attempt: reconnectAttempt, reconnectDelayMs, nextReconnectAt });
   let wake;
   await new Promise((resolve) => {
-    const timer = setTimeout(resolve, config.reconnectMs);
+    const timer = setTimeout(resolve, reconnectDelayMs);
     wake = () => {
       clearTimeout(timer);
       resolve();
@@ -318,6 +362,8 @@ async function waitBeforeReconnect() {
     wakeReconnectDelay = wake;
   });
   if (wakeReconnectDelay === wake) wakeReconnectDelay = null;
+  reconnectDelayMs = 0;
+  nextReconnectAt = "";
 }
 
 function startConnector() {
@@ -474,10 +520,13 @@ async function connectForever() {
 
     await new Promise((resolve) => {
       const ws = new WebSocket(url, { headers: connectHeaders() });
+      let opened = false;
       currentWs = ws;
       reconnectNow = resolve;
 
       ws.on("open", () => {
+        opened = true;
+        reconnectAttempt = 0;
         lastError = "";
         markServerActivity(ws);
         startServerHeartbeatWatchdog(ws);
@@ -487,6 +536,10 @@ async function connectForever() {
       ws.on("ping", () => {
         if (currentWs !== ws) return;
         markServerActivity(ws, { ping: true });
+      });
+      ws.on("pong", () => {
+        if (currentWs !== ws) return;
+        markServerActivity(ws);
       });
       ws.on("message", (raw, isBinary) => {
         if (currentWs !== ws) return;
@@ -538,6 +591,9 @@ async function connectForever() {
         }
         ws.close();
       });
+      ws.once("close", () => {
+        reconnectAttempt = opened ? 1 : reconnectAttempt + 1;
+      });
     });
 
     reconnectNow = null;
@@ -554,6 +610,9 @@ function statusPayload(req) {
     config: publicConfig(),
     connected: isConnected(),
     lastError,
+    reconnectAttempt,
+    reconnectDelayMs,
+    nextReconnectAt,
     lastServerPingAt,
     lastServerActivityAt: lastServerActivityAt ? new Date(lastServerActivityAt).toISOString() : "",
     mappings: config.mappings.map((mapping) => ({ ...mapping, status: mappingStatus(mapping), statusMessage: mappingStatusMessage(mapping), stats: updateRates(statsFor(mapping.id)) })),

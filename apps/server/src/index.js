@@ -8,6 +8,8 @@ import { applyCors } from "@http-tunnel/shared/cors";
 import { addAuditLog, isConfigured, listAuditLogs, loadSettings, saveSettings } from "./db.js";
 import {
   TUNNEL_HEARTBEAT_INTERVAL_MS,
+  TUNNEL_HEARTBEAT_LOOP_LAG_MS,
+  TUNNEL_HEARTBEAT_RECOVERY_MS,
   TUNNEL_HEARTBEAT_STALE_MS
 } from "@http-tunnel/shared/heartbeat";
 import { json, readJson, toHeaderObject } from "@http-tunnel/shared/http-utils";
@@ -39,7 +41,6 @@ ensureAdmin(config);
 
 const logger = createLogger("server");
 const WS_OPEN = 1;
-const REQUEST_IDLE_TIMEOUTS_BEFORE_RECONNECT = 2;
 const pending = new Map();
 const mappingServers = new Map();
 const mappingSpecs = new Map();
@@ -173,7 +174,10 @@ function clearClientHeartbeat(ws) {
 }
 
 function isClientHeartbeatTimedOut(ws = client) {
-  return Boolean(ws?.lastHeartbeatAt && Date.now() - ws.lastHeartbeatAt >= TUNNEL_HEARTBEAT_STALE_MS);
+  return Boolean(
+    ws?.lastHeartbeatMonotonicAt &&
+    performance.now() - ws.lastHeartbeatMonotonicAt >= TUNNEL_HEARTBEAT_STALE_MS
+  );
 }
 
 function isClientConnected(ws = client) {
@@ -189,6 +193,27 @@ function startClientHeartbeat(ws = client) {
   sendClientHeartbeat(ws);
 }
 
+function recoverHeartbeatAfterLoopPause(ws) {
+  const now = performance.now();
+  const loopElapsedMs = now - ws.lastHeartbeatLoopAt;
+  ws.lastHeartbeatLoopAt = now;
+  if (
+    loopElapsedMs < TUNNEL_HEARTBEAT_INTERVAL_MS + TUNNEL_HEARTBEAT_LOOP_LAG_MS ||
+    !isClientHeartbeatTimedOut(ws)
+  ) {
+    return false;
+  }
+
+  ws.lastHeartbeatMonotonicAt = now - TUNNEL_HEARTBEAT_STALE_MS + TUNNEL_HEARTBEAT_RECOVERY_MS;
+  logger.warn("heartbeat check resumed after local event loop pause", {
+    clientId: ws.clientId,
+    loopElapsedMs: Math.round(loopElapsedMs),
+    recoveryMs: TUNNEL_HEARTBEAT_RECOVERY_MS
+  });
+  scheduleClientHeartbeatTimeout(ws);
+  return true;
+}
+
 function markClientActivity(ws = client) {
   if (!ws || ws.readyState !== WS_OPEN || client !== ws) return;
   ws.lastActivityAt = new Date().toISOString();
@@ -196,7 +221,8 @@ function markClientActivity(ws = client) {
 
 function sendClientHeartbeat(ws) {
   if (!ws || ws.readyState !== WS_OPEN || client !== ws) return;
-  if (isClientHeartbeatTimedOut(ws)) {
+  const recoveredFromLoopPause = recoverHeartbeatAfterLoopPause(ws);
+  if (isClientHeartbeatTimedOut(ws) && !recoveredFromLoopPause) {
     logger.warn("client heartbeat timed out", {
       clientId: ws.clientId,
       lastHeartbeatAt: ws.lastHeartbeatAt ? new Date(ws.lastHeartbeatAt).toISOString() : "",
@@ -227,8 +253,18 @@ function sendClientHeartbeat(ws) {
 
 function scheduleClientHeartbeatTimeout(ws) {
   clearTimeout(ws.heartbeatTimeoutTimer);
+  const elapsedMs = performance.now() - ws.lastHeartbeatMonotonicAt;
+  const remainingMs = Math.max(1, TUNNEL_HEARTBEAT_STALE_MS - elapsedMs);
   ws.heartbeatTimeoutTimer = setTimeout(() => {
-    if (!isClientHeartbeatTimedOut(ws) || ws.readyState !== WS_OPEN || client !== ws) return;
+    if (ws.readyState !== WS_OPEN || client !== ws) return;
+    if (recoverHeartbeatAfterLoopPause(ws)) {
+      sendClientHeartbeat(ws);
+      return;
+    }
+    if (!isClientHeartbeatTimedOut(ws)) {
+      scheduleClientHeartbeatTimeout(ws);
+      return;
+    }
     logger.warn("client heartbeat timed out", {
       clientId: ws.clientId,
       lastHeartbeatAt: ws.lastHeartbeatAt ? new Date(ws.lastHeartbeatAt).toISOString() : "",
@@ -237,7 +273,7 @@ function scheduleClientHeartbeatTimeout(ws) {
       bufferedAmount: ws.bufferedAmount
     });
     ws.terminate();
-  }, TUNNEL_HEARTBEAT_STALE_MS);
+  }, remainingMs);
   ws.heartbeatTimeoutTimer.unref?.();
 }
 
@@ -259,41 +295,17 @@ function finishPending(id, errorMessage = "") {
   return item;
 }
 
-function terminateClient(reason, data = {}) {
-  if (!isClientConnected()) return;
-  logger.warn("terminating client connection", {
-    clientId: client.clientId,
-    reason,
-    pending: pending.size,
-    bufferedAmount: client.bufferedAmount,
-    ...data
-  });
-  client.terminate();
-}
-
-function resetClientRequestIdleTimeouts(ws = client) {
-  if (isClientConnected(ws)) ws.requestIdleTimeouts = 0;
-}
-
 function createIdleTimer(id, res) {
   const timeout = () => {
     const item = finishPending(id, "tunnel request idle timed out");
     if (!item) return;
     if (!res.headersSent) res.writeHead(504, { "content-type": "text/plain; charset=utf-8" });
     res.end("tunnel request idle timed out");
-    if (isClientConnected()) {
-      client.requestIdleTimeouts = (client.requestIdleTimeouts || 0) + 1;
-      logger.warn("tunnel request idle timed out", {
-        clientId: client.clientId,
-        requestId: id,
-        mappingId: item.mappingId,
-        requestIdleTimeouts: client.requestIdleTimeouts,
-        maxRequestIdleTimeouts: REQUEST_IDLE_TIMEOUTS_BEFORE_RECONNECT
-      });
-      if (client.requestIdleTimeouts >= REQUEST_IDLE_TIMEOUTS_BEFORE_RECONNECT) {
-        terminateClient("repeated tunnel request idle timeouts", { requestId: id, mappingId: item.mappingId });
-      }
-    }
+    logger.warn("tunnel request idle timed out", {
+      clientId: isClientConnected() ? client.clientId : "",
+      requestId: id,
+      mappingId: item.mappingId
+    });
   };
   return {
     timer: setTimeout(timeout, config.requestTimeoutMs),
@@ -402,7 +414,6 @@ async function endResponse(payload) {
   }
   if (payload.error) item.res.end(payload.error);
   else item.res.end();
-  if (!payload.error) resetClientRequestIdleTimeouts();
   finishPending(payload.id, payload.error || "");
 }
 
@@ -614,9 +625,10 @@ server.on("upgrade", (req, socket, head) => {
       ws.clientId = clientId || "client";
       ws.connectedAt = new Date().toISOString();
       ws.awaitingPong = false;
-      ws.requestIdleTimeouts = 0;
       ws.lastPongAt = "";
       ws.lastHeartbeatAt = Date.now();
+      ws.lastHeartbeatMonotonicAt = performance.now();
+      ws.lastHeartbeatLoopAt = performance.now();
       ws.lastPingAt = 0;
       ws.lastPingAtIso = "";
       ws.lastActivityAt = "";
@@ -646,6 +658,7 @@ wss.on("connection", (ws) => {
     const sentAt = Number(payload.toString());
     if (Number.isFinite(sentAt)) ws.latencyMs = Date.now() - sentAt;
     ws.lastHeartbeatAt = Date.now();
+    ws.lastHeartbeatMonotonicAt = performance.now();
     ws.lastPongAt = new Date(ws.lastHeartbeatAt).toISOString();
     scheduleClientHeartbeatTimeout(ws);
   });
