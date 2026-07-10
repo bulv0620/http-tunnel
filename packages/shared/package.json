@@ -9,6 +9,7 @@
     "./base-url": "./src/base-url.js",
     "./cors": "./src/cors.js",
     "./env-file": "./src/env-file.js",
+    "./heartbeat": "./src/heartbeat.js",
     "./http-utils": "./src/http-utils.js",
     "./logger": "./src/logger.js",
     "./mappings": "./src/mappings.js",

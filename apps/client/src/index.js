@@ -6,6 +6,10 @@ import { clearSessions, ensureAdmin, requireAuth, login, logout, currentUser } f
 import { stripBaseUrl } from "@http-tunnel/shared/base-url";
 import { applyCors } from "@http-tunnel/shared/cors";
 import {
+  TUNNEL_HEARTBEAT_CHECK_MS,
+  TUNNEL_HEARTBEAT_STALE_MS
+} from "@http-tunnel/shared/heartbeat";
+import {
   createMapping as createStoredMapping,
   deleteMapping as deleteStoredMapping,
   isConfigured,
@@ -49,6 +53,7 @@ let wakeReconnectDelay;
 let skipNextReconnectDelay = false;
 let lastError = "";
 let lastServerPingAt = "";
+let lastServerActivityAt = 0;
 let connectorStarted = false;
 const activeRequests = new Map();
 const mappingStats = new Map();
@@ -217,7 +222,45 @@ function sendMappings() {
 }
 
 function isConnected() {
-  return currentWs?.readyState === WS_OPEN;
+  return currentWs?.readyState === WS_OPEN && !isServerHeartbeatStale(currentWs);
+}
+
+function markServerActivity(ws = currentWs, options = {}) {
+  if (!ws || currentWs !== ws) return;
+  lastServerActivityAt = Date.now();
+  if (options.ping) lastServerPingAt = new Date().toISOString();
+}
+
+function isServerHeartbeatStale(ws = currentWs) {
+  if (!ws || ws.readyState !== WS_OPEN) return false;
+  if (!lastServerActivityAt) return false;
+  return Date.now() - lastServerActivityAt >= TUNNEL_HEARTBEAT_STALE_MS;
+}
+
+function startServerHeartbeatWatchdog(ws) {
+  const check = () => {
+    if (currentWs !== ws || ws.readyState !== WS_OPEN) return;
+    if (isServerHeartbeatStale(ws)) {
+      lastError = "server heartbeat timed out";
+      logger.warn("server heartbeat timed out", {
+        staleMs: Date.now() - lastServerActivityAt,
+        timeoutMs: TUNNEL_HEARTBEAT_STALE_MS,
+        bufferedAmount: ws.bufferedAmount
+      });
+      ws.terminate();
+      return;
+    }
+    ws.serverHeartbeatTimer = setTimeout(check, TUNNEL_HEARTBEAT_CHECK_MS);
+    ws.serverHeartbeatTimer.unref?.();
+  };
+  clearTimeout(ws.serverHeartbeatTimer);
+  ws.serverHeartbeatTimer = setTimeout(check, TUNNEL_HEARTBEAT_CHECK_MS);
+  ws.serverHeartbeatTimer.unref?.();
+}
+
+function clearServerHeartbeatWatchdog(ws) {
+  clearTimeout(ws.serverHeartbeatTimer);
+  ws.serverHeartbeatTimer = null;
 }
 
 function wakeConnector() {
@@ -436,13 +479,18 @@ async function connectForever() {
 
       ws.on("open", () => {
         lastError = "";
+        markServerActivity(ws);
+        startServerHeartbeatWatchdog(ws);
         logger.info("connected to server", { serverUrl: url.origin + url.pathname, mappings: config.mappings.length });
         void sendWs(ws, JSON.stringify({ type: "hello", mappings: config.mappings }));
       });
       ws.on("ping", () => {
-        lastServerPingAt = new Date().toISOString();
+        if (currentWs !== ws) return;
+        markServerActivity(ws, { ping: true });
       });
       ws.on("message", (raw, isBinary) => {
+        if (currentWs !== ws) return;
+        markServerActivity(ws);
         if (isBinary) {
           const frame = decodeFrame(raw);
           if (frame?.type === FRAME.REQUEST_BODY) void handleRequestBody(frame.id, frame.chunk);
@@ -470,8 +518,10 @@ async function connectForever() {
         }
       });
       ws.on("close", () => {
+        clearServerHeartbeatWatchdog(ws);
         if (currentWs === ws) {
           currentWs = null;
+          remoteMappingStatuses.clear();
           failActiveRequests(ws, "server disconnected");
           logger.warn("disconnected from server", { reconnectMs: config.reconnectMs });
         } else {
@@ -505,6 +555,7 @@ function statusPayload(req) {
     connected: isConnected(),
     lastError,
     lastServerPingAt,
+    lastServerActivityAt: lastServerActivityAt ? new Date(lastServerActivityAt).toISOString() : "",
     mappings: config.mappings.map((mapping) => ({ ...mapping, status: mappingStatus(mapping), statusMessage: mappingStatusMessage(mapping), stats: updateRates(statsFor(mapping.id)) })),
     logs: logger.entries
   };
