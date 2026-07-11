@@ -56,9 +56,16 @@ MAX_CONCURRENT_REQUESTS=256
 MAX_CONCURRENT_REQUESTS_PER_MAPPING=64
 MAX_WS_PAYLOAD_BYTES=2097152
 MAX_HEADER_BYTES=16384
+
+# 客户端到服务端的端到端应用层探测与最大重连退避
+TUNNEL_PROBE_INTERVAL_MS=5000
+TUNNEL_PROBE_TIMEOUT_MS=10000
+MAX_RECONNECT_DELAY_MS=15000
 ```
 
 `TRUST_PROXY=true` 后才会信任 `X-Forwarded-For` 和 `X-Forwarded-Proto`。如果管理页面与 API 不同源，必须把完整 Origin 加入 `CORS_ORIGINS`；不要配置不受信任的来源。
+
+隧道使用双向存活检测：服务端保留 WebSocket `ping/pong` 用于链路延迟，但端到端存活只由应用层心跳或业务消息确认。客户端每 5 秒发送一次端到端应用层探测，并在探测实际写入连接后等待最多 10 秒。应用层探测必须到达 VPS 进程并收到确认，不依赖 CDN 是否及时传递 TCP/WebSocket `close`，也不会被 CDN 自己回复的控制帧误导。持续有效的隧道业务消息也会刷新存活状态，避免大流量期间仅因控制帧延迟而误断。已验证连接首次失联会立即重连；持续失败才进入指数退避，默认最高 15 秒。
 
 业务配置和映射数据存到 SQLite：
 

@@ -80,8 +80,12 @@
           <strong>{{ status.config?.tunnelToken ? t("dashboard.tokenSet") : t("dashboard.tokenUnset") }}</strong>
         </div>
         <div class="connection-item">
-          <span>{{ t("dashboard.lastHeartbeat") }}</span>
-          <strong>{{ formatTime(status.lastServerPingAt) }}</strong>
+          <span>{{ t("dashboard.endToEndHeartbeat") }}</span>
+          <strong>{{ formatTime(status.lastServerProbeAckAt || status.lastServerPingAt) }}</strong>
+        </div>
+        <div class="connection-item">
+          <span>{{ t("dashboard.endToEndLatency") }}</span>
+          <strong>{{ status.serverProbeLatencyMs ?? "-" }} ms</strong>
         </div>
         <div class="connection-item">
           <span>{{ t("dashboard.reconnectMs") }}</span>

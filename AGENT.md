@@ -60,6 +60,9 @@ MAX_CONCURRENT_REQUESTS              256
 MAX_CONCURRENT_REQUESTS_PER_MAPPING  64
 MAX_WS_PAYLOAD_BYTES                 2097152
 MAX_HEADER_BYTES                     16384
+TUNNEL_PROBE_INTERVAL_MS              5000
+TUNNEL_PROBE_TIMEOUT_MS               10000
+MAX_RECONNECT_DELAY_MS                15000
 ```
 
 Environment parsing is centralized in `packages/shared/src/runtime-config.js` and fails fast for invalid booleans or positive integers.
@@ -229,11 +232,15 @@ Backpressure waiting has a 30-second ceiling. Stream writes resolve on `drain`, 
 
 ## Connection Recovery
 
-The server sends a heartbeat ping every 15 seconds. A tunnel is stale after 75 seconds without a valid heartbeat. The client checks server activity every 5 seconds.
+The server sends a WebSocket ping every 15 seconds for transport latency. A tunnel is stale after 75 seconds without valid end-to-end client liveness. Valid inbound application messages (including `heartbeat` and response body frames) refresh server liveness; control ping/pong frames do not, because a CDN/proxy may terminate and answer them itself. This also means an active transfer is not disconnected merely because a control-frame pong is delayed.
+
+The client also sends an end-to-end JSON `heartbeat` probe every 5 seconds. The server must return `heartbeat-ack`; the client terminates the socket if no acknowledgement or other valid server message arrives within 10 seconds after the probe is written. This application-level probe is intentional for CDN/proxy paths where a stale client-to-edge WebSocket can outlive the edge-to-origin connection. Do not replace it with only WebSocket control ping/pong.
+
+New clients advertise `heartbeatVersion: 1` in `hello`, and new servers advertise it in `mapping-status`/`heartbeat-ack`. Before both sides negotiate this capability, the server lets pong refresh liveness and the client does not enforce the application-probe deadline, preserving rolling compatibility with older peers. After negotiation, only application messages refresh end-to-end liveness.
 
 Heartbeat freshness uses the monotonic clock. If the local event loop resumes after a long pause, the peer gets a short 10-second fresh-probe window instead of an immediate stale disconnect. Preserve this distinction between peer failure and a local process pause.
 
-The client reconnects forever. Reconnect delay starts at `reconnectMs`, uses exponential backoff with jitter, and caps at 30 seconds when the configured base is lower. A successful connection or an explicit manual/config restart resets the retry state. Retry count and next retry time are exposed by the client status API and dashboard.
+The client reconnects forever. Reconnect delay starts at `reconnectMs`, uses exponential backoff with jitter, and defaults to a 15-second cap when the configured base is lower. Probe timeout and closure of a connection that was healthy for at least 30 seconds trigger one immediate reconnect; repeated setup/auth/connect failures still use backoff. A successful end-to-end verification or an explicit manual/config restart resets the retry state. Retry count, next retry time, end-to-end acknowledgement time, and probe latency are exposed by the client status API and dashboard.
 
 ## Timeout Semantics
 

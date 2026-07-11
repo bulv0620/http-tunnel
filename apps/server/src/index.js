@@ -114,7 +114,7 @@ function mappingStatusPayload() {
 
 async function sendMappingStatus(ws = client) {
   if (!ws || ws.readyState !== WS_OPEN || client !== ws || isClientHeartbeatTimedOut(ws)) return false;
-  const sent = await sendWs(ws, JSON.stringify({ type: "mapping-status", mappings: mappingStatusPayload() }));
+  const sent = await sendWs(ws, JSON.stringify({ type: "mapping-status", heartbeatVersion: 1, mappings: mappingStatusPayload() }));
   if (sent) markClientActivity(ws);
   return sent;
 }
@@ -224,9 +224,13 @@ function recoverHeartbeatAfterLoopPause(ws) {
   return true;
 }
 
-function markClientActivity(ws = client) {
+function markClientActivity(ws = client, { liveness = false } = {}) {
   if (!ws || ws.readyState !== WS_OPEN || client !== ws) return;
   ws.lastActivityAt = new Date().toISOString();
+  if (liveness) {
+    ws.lastHeartbeatAt = Date.now();
+    ws.lastHeartbeatMonotonicAt = performance.now();
+  }
 }
 
 function sendClientHeartbeat(ws) {
@@ -674,6 +678,7 @@ server.on("upgrade", (req, socket, head) => {
       ws.connectedAt = new Date().toISOString();
       ws.awaitingPong = false;
       ws.lastPongAt = "";
+      ws.supportsAppHeartbeat = false;
       ws.lastHeartbeatAt = Date.now();
       ws.lastHeartbeatMonotonicAt = performance.now();
       ws.lastHeartbeatLoopAt = performance.now();
@@ -699,21 +704,24 @@ wss.on("connection", (ws) => {
 
   ws.on("pong", (payload) => {
     if (client !== ws) return;
-    markClientActivity(ws);
+    markClientActivity(ws, { liveness: !ws.supportsAppHeartbeat });
     ws.awaitingPong = false;
     clearTimeout(ws.heartbeatTimeoutTimer);
     ws.heartbeatTimeoutTimer = null;
     const sentAt = Number(payload.toString());
     if (Number.isFinite(sentAt)) ws.latencyMs = Date.now() - sentAt;
-    ws.lastHeartbeatAt = Date.now();
-    ws.lastHeartbeatMonotonicAt = performance.now();
-    ws.lastPongAt = new Date(ws.lastHeartbeatAt).toISOString();
+    ws.lastPongAt = new Date().toISOString();
     scheduleClientHeartbeatTimeout(ws);
+  });
+
+  ws.on("ping", () => {
+    if (client !== ws) return;
+    markClientActivity(ws);
   });
 
   ws.on("message", (raw, isBinary) => {
     if (client !== ws) return;
-    markClientActivity(ws);
+    markClientActivity(ws, { liveness: true });
     if (isBinary) {
       const frame = decodeFrame(raw);
       if (frame?.type === FRAME.RESPONSE_BODY) void writeResponseBody(frame.id, frame.chunk);
@@ -727,10 +735,16 @@ wss.on("connection", (ws) => {
       return;
     }
     if (payload.type === "hello" || payload.type === "mappings") {
+      if (payload.type === "hello" && Number(payload.heartbeatVersion) >= 1) ws.supportsAppHeartbeat = true;
       applyMappings(payload.mappings || []);
       logger.info("mappings updated", { count: mappings.length });
       addAuditLog("mappings_updated", { actor: ws.clientId, data: { count: mappings.length } });
       void sendMappingStatus(ws);
+      return;
+    }
+    if (payload.type === "heartbeat" && typeof payload.nonce === "string" && payload.nonce.length <= 64) {
+      ws.supportsAppHeartbeat = true;
+      void sendWs(ws, JSON.stringify({ type: "heartbeat-ack", nonce: payload.nonce }));
       return;
     }
     if (payload.type === "response-start" && isRequestId(payload.id)) startResponse(payload);

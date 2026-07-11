@@ -6,6 +6,8 @@ import { clearSessions, createLoginRateLimiter, ensureAdmin, requireAuth, login,
 import { stripBaseUrl } from "@http-tunnel/shared/base-url";
 import { applyCors } from "@http-tunnel/shared/cors";
 import {
+  TUNNEL_ACTIVE_PROBE_INTERVAL_MS,
+  TUNNEL_ACTIVE_PROBE_TIMEOUT_MS,
   TUNNEL_HEARTBEAT_CHECK_MS,
   TUNNEL_HEARTBEAT_LOOP_LAG_MS,
   TUNNEL_HEARTBEAT_RECOVERY_MS,
@@ -42,7 +44,10 @@ const listenConfig = {
   maxConcurrentRequests: envPositiveInteger("MAX_CONCURRENT_REQUESTS", 256),
   maxConcurrentRequestsPerMapping: envPositiveInteger("MAX_CONCURRENT_REQUESTS_PER_MAPPING", 64),
   maxWsPayloadBytes: envPositiveInteger("MAX_WS_PAYLOAD_BYTES", 2 * 1024 * 1024),
-  maxHeaderBytes: envPositiveInteger("MAX_HEADER_BYTES", 16 * 1024)
+  maxHeaderBytes: envPositiveInteger("MAX_HEADER_BYTES", 16 * 1024),
+  maxReconnectDelayMs: envPositiveInteger("MAX_RECONNECT_DELAY_MS", 15000, { min: 500 }),
+  serverProbeIntervalMs: envPositiveInteger("TUNNEL_PROBE_INTERVAL_MS", TUNNEL_ACTIVE_PROBE_INTERVAL_MS, { min: 500 }),
+  serverProbeTimeoutMs: envPositiveInteger("TUNNEL_PROBE_TIMEOUT_MS", TUNNEL_ACTIVE_PROBE_TIMEOUT_MS, { min: 500 })
 };
 const config = {
   ...listenConfig,
@@ -60,8 +65,8 @@ const WS_OPEN = 1;
 const WS_CLOSING = 2;
 const RESTART_FORCE_CLOSE_MS = 1000;
 const RESTART_RESUME_MS = 2000;
-const MAX_RECONNECT_DELAY_MS = 30000;
 const RECONNECT_JITTER_RATIO = 0.2;
+const STABLE_CONNECTION_MS = 30000;
 let currentWs = null;
 let reconnectNow;
 let wakeReconnectDelay;
@@ -74,6 +79,9 @@ let connectorStarted = false;
 let reconnectAttempt = 0;
 let reconnectDelayMs = 0;
 let nextReconnectAt = "";
+let lastServerProbeAt = "";
+let lastServerProbeAckAt = "";
+let serverProbeLatencyMs = null;
 const activeRequests = new Map();
 const mappingStats = new Map();
 const remoteMappingStatuses = new Map();
@@ -241,14 +249,86 @@ function sendMappings() {
 }
 
 function isConnected() {
-  return currentWs?.readyState === WS_OPEN && !isServerHeartbeatStale(currentWs);
+  return currentWs?.readyState === WS_OPEN && currentWs.serverVerified === true && !isServerHeartbeatStale(currentWs);
 }
 
 function markServerActivity(ws = currentWs, options = {}) {
   if (!ws || currentWs !== ws) return;
   lastServerActivityAt = Date.now();
   lastServerActivityMonotonicAt = performance.now();
+  if (options.verified !== false) {
+    if (!ws.serverVerified) {
+      ws.serverVerified = true;
+      ws.serverVerifiedAt = performance.now();
+      reconnectAttempt = 0;
+      logger.info("server connection verified", { serverUrl: config.serverUrl });
+    }
+    lastError = "";
+  }
   if (options.ping) lastServerPingAt = new Date().toISOString();
+}
+
+function resolveServerProbe(ws, nonce = "") {
+  const probe = ws?.serverProbe;
+  if (!probe || (nonce && probe.nonce !== nonce)) return;
+  clearTimeout(ws.serverProbeTimeoutTimer);
+  ws.serverProbeTimeoutTimer = null;
+  ws.serverProbe = null;
+  if (nonce) {
+    lastServerProbeAckAt = new Date().toISOString();
+    serverProbeLatencyMs = Math.max(0, Math.round(performance.now() - probe.startedAt));
+  }
+}
+
+async function sendServerProbe(ws) {
+  if (currentWs !== ws || ws.readyState !== WS_OPEN || ws.serverProbe || ws.serverProbeWriteInFlight) return;
+  const nonce = crypto.randomBytes(12).toString("hex");
+  const probe = { nonce, startedAt: performance.now() };
+  ws.serverProbe = probe;
+  ws.serverProbeWriteInFlight = true;
+  lastServerProbeAt = new Date().toISOString();
+  const sent = await sendWs(ws, JSON.stringify({ type: "heartbeat", nonce }));
+  ws.serverProbeWriteInFlight = false;
+  if (currentWs !== ws || ws.serverProbe !== probe) return;
+  if (!sent) {
+    lastError = "server heartbeat probe send failed";
+    skipNextReconnectDelay = ws.serverVerified === true;
+    ws.terminate();
+    return;
+  }
+  if (!ws.serverSupportsAppHeartbeat) {
+    ws.serverProbe = null;
+    return;
+  }
+  ws.serverProbeTimeoutTimer = setTimeout(() => {
+    if (currentWs !== ws || ws.serverProbe !== probe || ws.readyState !== WS_OPEN) return;
+    lastError = "server heartbeat probe timed out";
+    logger.warn("server heartbeat probe timed out", {
+      timeoutMs: config.serverProbeTimeoutMs,
+      bufferedAmount: ws.bufferedAmount
+    });
+    skipNextReconnectDelay = ws.serverVerified === true;
+    ws.terminate();
+  }, config.serverProbeTimeoutMs);
+  ws.serverProbeTimeoutTimer.unref?.();
+}
+
+function startServerActiveProbe(ws) {
+  clearInterval(ws.serverProbeInterval);
+  ws.serverProbe = null;
+  ws.serverProbeWriteInFlight = false;
+  ws.serverProbeInterval = setInterval(() => void sendServerProbe(ws), config.serverProbeIntervalMs);
+  ws.serverProbeInterval.unref?.();
+  void sendServerProbe(ws);
+}
+
+function clearServerActiveProbe(ws) {
+  clearInterval(ws.serverProbeInterval);
+  clearTimeout(ws.serverProbeTimeoutTimer);
+  ws.serverProbeInterval = null;
+  ws.serverProbeTimeoutTimer = null;
+  ws.serverProbe = null;
+  ws.serverProbeWriteInFlight = false;
 }
 
 function isServerHeartbeatStale(ws = currentWs) {
@@ -346,7 +426,7 @@ function restartConnection(reason = "connection restart requested", options = {}
 function calculateReconnectDelay(attempt) {
   const baseDelayMs = Math.max(1, config.reconnectMs);
   if (attempt <= 1) return baseDelayMs;
-  const maximumDelayMs = Math.max(baseDelayMs, MAX_RECONNECT_DELAY_MS);
+  const maximumDelayMs = Math.max(baseDelayMs, config.maxReconnectDelayMs);
   const exponentialDelayMs = Math.min(maximumDelayMs, baseDelayMs * (2 ** Math.min(attempt - 1, 10)));
   const jitterMs = exponentialDelayMs * RECONNECT_JITTER_RATIO * Math.random();
   return Math.round(Math.min(maximumDelayMs, exponentialDelayMs + jitterMs));
@@ -559,31 +639,32 @@ async function connectForever() {
         maxPayload: config.maxWsPayloadBytes,
         perMessageDeflate: false
       });
-      let opened = false;
       currentWs = ws;
       reconnectNow = resolve;
 
       ws.on("open", () => {
-        opened = true;
-        reconnectAttempt = 0;
-        lastError = "";
-        markServerActivity(ws);
+        ws.serverVerified = false;
+        ws.serverVerifiedAt = 0;
+        ws.serverSupportsAppHeartbeat = false;
+        markServerActivity(ws, { verified: false });
         startServerHeartbeatWatchdog(ws);
-        logger.info("connected to server", { serverUrl: url.origin + url.pathname, mappings: config.mappings.length });
-        void sendWs(ws, JSON.stringify({ type: "hello", mappings: config.mappings }));
+        startServerActiveProbe(ws);
+        logger.info("websocket opened", { serverUrl: url.origin + url.pathname, mappings: config.mappings.length });
+        void sendWs(ws, JSON.stringify({ type: "hello", heartbeatVersion: 1, mappings: config.mappings }));
       });
       ws.on("ping", () => {
         if (currentWs !== ws) return;
-        markServerActivity(ws, { ping: true });
+        markServerActivity(ws, { ping: true, verified: false });
       });
       ws.on("pong", () => {
         if (currentWs !== ws) return;
-        markServerActivity(ws);
+        markServerActivity(ws, { verified: false });
       });
       ws.on("message", (raw, isBinary) => {
         if (currentWs !== ws) return;
         markServerActivity(ws);
         if (isBinary) {
+          resolveServerProbe(ws);
           const frame = decodeFrame(raw);
           if (frame?.type === FRAME.REQUEST_BODY) void handleRequestBody(frame.id, frame.chunk);
           return;
@@ -593,8 +674,16 @@ async function connectForever() {
         try {
           message = JSON.parse(raw.toString());
         } catch {
+          resolveServerProbe(ws);
           return;
         }
+        if (message.type === "heartbeat-ack" && typeof message.nonce === "string") {
+          ws.serverSupportsAppHeartbeat = true;
+          resolveServerProbe(ws, message.nonce);
+          return;
+        }
+        if (Number(message.heartbeatVersion) >= 1) ws.serverSupportsAppHeartbeat = true;
+        resolveServerProbe(ws);
         if (message.type === "request-start" && isRequestId(message.id)) handleRequestStart(ws, message);
         if (message.type === "request-end" && isRequestId(message.id)) handleRequestEnd(ws, message.id);
         if (message.type === "mapping-status") {
@@ -611,6 +700,7 @@ async function connectForever() {
       });
       ws.on("close", () => {
         clearServerHeartbeatWatchdog(ws);
+        clearServerActiveProbe(ws);
         if (currentWs === ws) {
           currentWs = null;
           remoteMappingStatuses.clear();
@@ -631,7 +721,8 @@ async function connectForever() {
         ws.close();
       });
       ws.once("close", () => {
-        reconnectAttempt = opened ? 1 : reconnectAttempt + 1;
+        if (ws.serverVerifiedAt && performance.now() - ws.serverVerifiedAt >= STABLE_CONNECTION_MS) skipNextReconnectDelay = true;
+        reconnectAttempt = ws.serverVerified ? 1 : reconnectAttempt + 1;
       });
     });
 
@@ -652,10 +743,16 @@ function statusPayload(req) {
     reconnectAttempt,
     reconnectDelayMs,
     nextReconnectAt,
+    lastServerProbeAt,
+    lastServerProbeAckAt,
+    serverProbeLatencyMs,
     limits: {
       maxConcurrentRequests: config.maxConcurrentRequests,
       maxConcurrentRequestsPerMapping: config.maxConcurrentRequestsPerMapping,
-      maxWsPayloadBytes: config.maxWsPayloadBytes
+      maxWsPayloadBytes: config.maxWsPayloadBytes,
+      maxReconnectDelayMs: config.maxReconnectDelayMs,
+      serverProbeIntervalMs: config.serverProbeIntervalMs,
+      serverProbeTimeoutMs: config.serverProbeTimeoutMs
     },
     lastServerPingAt,
     lastServerActivityAt: lastServerActivityAt ? new Date(lastServerActivityAt).toISOString() : "",

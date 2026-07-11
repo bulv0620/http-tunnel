@@ -9,3 +9,5 @@ export const TUNNEL_HEARTBEAT_CHECK_MS = 5000;
 // connection from an old wall-clock observation immediately.
 export const TUNNEL_HEARTBEAT_LOOP_LAG_MS = 5000;
 export const TUNNEL_HEARTBEAT_RECOVERY_MS = 10000;
+export const TUNNEL_ACTIVE_PROBE_INTERVAL_MS = 5000;
+export const TUNNEL_ACTIVE_PROBE_TIMEOUT_MS = 10000;
