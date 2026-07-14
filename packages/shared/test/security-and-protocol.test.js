@@ -14,7 +14,12 @@ import {
   isRequestId,
   writeStream
 } from "../src/stream-protocol.js";
-import { TUNNEL_EVENT, sendTunnel } from "../src/tunnel-transport.js";
+import {
+  TUNNEL_CONTROL_EVENT,
+  TUNNEL_DATA_EVENT,
+  sendTunnelControl,
+  sendTunnelData
+} from "../src/tunnel-transport.js";
 
 function mockResponse() {
   return {
@@ -105,21 +110,32 @@ test("stream frames validate request ids and frame types", () => {
   assert.equal(decodeFrame(Buffer.concat([Buffer.from([99]), Buffer.alloc(16)])), null);
 });
 
-test("Socket.IO tunnel sends require acknowledgements", async () => {
+test("Socket.IO control messages use connection state", () => {
   const socket = {
     connected: true,
-    timeout() {
-      return this;
-    },
-    emit(event, payload, acknowledge) {
-      assert.equal(event, TUNNEL_EVENT);
+    emit(event, payload) {
+      assert.equal(event, TUNNEL_CONTROL_EVENT);
       assert.deepEqual(payload, { type: "hello" });
-      acknowledge();
     }
   };
-  assert.equal(await sendTunnel(socket, { type: "hello" }), true);
+  assert.equal(sendTunnelControl(socket, { type: "hello" }), true);
   socket.connected = false;
-  assert.equal(await sendTunnel(socket, { type: "hello" }), false);
+  assert.equal(sendTunnelControl(socket, { type: "hello" }), false);
+});
+
+test("Socket.IO binary sends wait for local Engine.IO drain", async () => {
+  const engine = new EventEmitter();
+  const socket = new EventEmitter();
+  socket.connected = true;
+  socket.io = { engine };
+  const emit = socket.emit.bind(socket);
+  socket.emit = (event, payload) => {
+    if (event === TUNNEL_DATA_EVENT) assert.deepEqual(payload, Buffer.from("body"));
+    return emit(event, payload);
+  };
+  const sent = sendTunnelData(socket, Buffer.from("body"));
+  engine.emit("drain");
+  assert.equal(await sent, true);
 });
 
 test("stream close resolves as a failed write", async () => {

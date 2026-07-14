@@ -63,7 +63,7 @@ MAX_RECONNECT_DELAY_MS=15000
 
 `TRUST_PROXY=true` 后才会信任 `X-Forwarded-For` 和 `X-Forwarded-Proto`。如果管理页面与 API 不同源，必须把完整 Origin 加入 `CORS_ORIGINS`；不要配置不受信任的来源。
 
-隧道的连接心跳和自动重连由 Socket.IO/Engine.IO 管理。客户端启用无限重连、指数退避和随机抖动，基础延迟使用页面中的 `reconnectMs`，最大延迟默认 15 秒。项目不再发送自定义应用层心跳。隧道业务事件仍要求接收端 ACK，并设置 30 秒发送超时，用于限制流式传输排队和保留请求级失败处理。
+隧道的连接心跳和自动重连由 Socket.IO/Engine.IO 管理。客户端启用无限重连、指数退避和随机抖动，基础延迟使用页面中的 `reconnectMs`，最大延迟默认 15 秒。项目不再发送自定义应用层心跳。控制消息使用普通 Socket.IO 事件，文件 body 使用独立二进制事件；发送端等待 Engine.IO 本地 `drain` 后继续读取 HTTP 流，不等待远端逐块 ACK。
 
 业务配置和映射数据存到 SQLite：
 

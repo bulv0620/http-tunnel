@@ -13,7 +13,13 @@ import { hashPassword } from "@http-tunnel/shared/password";
 import { envBoolean, envList, envPositiveInteger } from "@http-tunnel/shared/runtime-config";
 import { serveStaticWeb } from "@http-tunnel/shared/static-web";
 import { FRAME, createRequestId, decodeFrame, encodeFrame, isRequestId, writeStream } from "@http-tunnel/shared/stream-protocol";
-import { TUNNEL_EVENT, isTunnelConnected, sendTunnel } from "@http-tunnel/shared/tunnel-transport";
+import {
+  TUNNEL_CONTROL_EVENT,
+  TUNNEL_DATA_EVENT,
+  isTunnelConnected,
+  sendTunnelControl,
+  sendTunnelData
+} from "@http-tunnel/shared/tunnel-transport";
 
 loadEnvFile(".env.server");
 
@@ -109,7 +115,7 @@ function mappingStatusPayload() {
 
 async function sendMappingStatus(socket = client) {
   if (!isClientConnected(socket) || client !== socket) return false;
-  return sendTunnel(socket, { type: "mapping-status", mappings: mappingStatusPayload() });
+  return sendTunnelControl(socket, { type: "mapping-status", mappings: mappingStatusPayload() });
 }
 
 function stopRemovedMappings(nextMappings) {
@@ -174,7 +180,7 @@ function isClientConnected(socket = client) {
 
 async function sendToClient(payload) {
   if (!isClientConnected()) return false;
-  return sendTunnel(client, payload);
+  return sendTunnelControl(client, payload);
 }
 
 function finishPending(id, errorMessage = "") {
@@ -294,7 +300,7 @@ async function handleMappedRequest(mapping, req, res) {
 
 async function sendToClientBinary(payload) {
   if (!isClientConnected()) return false;
-  return sendTunnel(client, payload);
+  return sendTunnelData(client, payload);
 }
 
 function startResponse(payload) {
@@ -557,37 +563,25 @@ io.on("connection", (socket) => {
   logger.info("client connected", { clientId: socket.clientId, transport: socket.conn.transport.name });
   addAuditLog("client_connected", { actor: socket.clientId, data: { clientId: socket.clientId } });
 
-  socket.on(TUNNEL_EVENT, async (payload, acknowledge) => {
-    if (client !== socket) {
-      acknowledge?.();
-      return;
-    }
-    if (Buffer.isBuffer(payload)) {
-      const frame = decodeFrame(payload);
-      if (frame?.type === FRAME.RESPONSE_BODY) await writeResponseBody(frame.id, frame.chunk);
-      acknowledge?.();
-      return;
-    }
-    if (!payload || typeof payload !== "object") {
-      acknowledge?.();
-      return;
-    }
+  socket.on(TUNNEL_DATA_EVENT, async (payload) => {
+    if (client !== socket || !Buffer.isBuffer(payload)) return;
+    const frame = decodeFrame(payload);
+    if (frame?.type === FRAME.RESPONSE_BODY) await writeResponseBody(frame.id, frame.chunk);
+  });
+
+  socket.on(TUNNEL_CONTROL_EVENT, async (payload) => {
+    if (client !== socket || !payload || typeof payload !== "object") return;
     if (payload.type === "hello" || payload.type === "mappings") {
-      if (!Array.isArray(payload.mappings)) {
-        acknowledge?.();
-        return;
-      }
+      if (!Array.isArray(payload.mappings)) return;
       applyMappings(payload.mappings);
       logger.info("mappings updated", { count: mappings.length });
       addAuditLog("mappings_updated", { actor: socket.clientId, data: { count: mappings.length } });
-      acknowledge?.();
       void sendMappingStatus(socket);
       return;
     }
     if (payload.type === "response-start" && isRequestId(payload.id)) startResponse(payload);
     if (payload.type === "response-end" && isRequestId(payload.id)) await endResponse(payload);
     if (payload.type === "response-error" && isRequestId(payload.id)) await endResponse(payload);
-    acknowledge?.();
   });
 
   socket.on("error", (error) => {

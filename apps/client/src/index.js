@@ -21,7 +21,13 @@ import { hashPassword } from "@http-tunnel/shared/password";
 import { envBoolean, envList, envPositiveInteger } from "@http-tunnel/shared/runtime-config";
 import { serveStaticWeb } from "@http-tunnel/shared/static-web";
 import { FRAME, decodeFrame, encodeFrame, isRequestId, writeStream } from "@http-tunnel/shared/stream-protocol";
-import { TUNNEL_EVENT, isTunnelConnected, sendTunnel } from "@http-tunnel/shared/tunnel-transport";
+import {
+  TUNNEL_CONTROL_EVENT,
+  TUNNEL_DATA_EVENT,
+  isTunnelConnected,
+  sendTunnelControl,
+  sendTunnelData
+} from "@http-tunnel/shared/tunnel-transport";
 import { validatePort } from "@http-tunnel/shared/validators";
 
 loadEnvFile(".env.client");
@@ -241,7 +247,7 @@ function connectHeaders() {
 
 function sendMappings() {
   if (!isTunnelConnected(currentSocket)) return;
-  void sendTunnel(currentSocket, { type: "mappings", mappings: config.mappings });
+  sendTunnelControl(currentSocket, { type: "mappings", mappings: config.mappings });
 }
 
 function isConnected() {
@@ -285,7 +291,7 @@ function startConnector() {
     connectedAt = new Date().toISOString();
     lastError = "";
     logger.info("socket.io connected", { serverUrl: config.serverUrl, mappings: config.mappings.length });
-    void sendTunnel(socket, { type: "hello", mappings: config.mappings });
+    sendTunnelControl(socket, { type: "hello", mappings: config.mappings });
   });
   socket.on("connect_error", (error) => {
     lastError = error.message;
@@ -305,24 +311,17 @@ function startConnector() {
     connectedAt = "";
     logger.warn("disconnected from server", { reason });
   });
-  socket.on(TUNNEL_EVENT, async (payload, acknowledge) => {
-    if (currentSocket !== socket) {
-      acknowledge?.();
-      return;
+  socket.on(TUNNEL_DATA_EVENT, async (payload) => {
+    if (currentSocket !== socket || !Buffer.isBuffer(payload)) return;
+    const frame = decodeFrame(payload);
+    if (frame?.type === FRAME.REQUEST_BODY) {
+      verifyServerConnection(socket);
+      await handleRequestBody(frame.id, frame.chunk);
     }
-    if (Buffer.isBuffer(payload)) {
-      const frame = decodeFrame(payload);
-      if (frame?.type === FRAME.REQUEST_BODY) {
-        verifyServerConnection(socket);
-        await handleRequestBody(frame.id, frame.chunk);
-      }
-      acknowledge?.();
-      return;
-    }
-    if (!payload || typeof payload !== "object") {
-      acknowledge?.();
-      return;
-    }
+  });
+
+  socket.on(TUNNEL_CONTROL_EVENT, async (payload) => {
+    if (currentSocket !== socket || !payload || typeof payload !== "object") return;
     if (payload.type === "request-start" && isRequestId(payload.id)) {
       verifyServerConnection(socket);
       handleRequestStart(socket, payload);
@@ -332,10 +331,7 @@ function startConnector() {
       await handleRequestEnd(socket, payload.id);
     }
     if (payload.type === "mapping-status") {
-      if (!Array.isArray(payload.mappings)) {
-        acknowledge?.();
-        return;
-      }
+      if (!Array.isArray(payload.mappings)) return;
       verifyServerConnection(socket);
       remoteMappingStatuses.clear();
       for (const item of payload.mappings) {
@@ -348,7 +344,6 @@ function startConnector() {
       if (active) destroyActiveRequest(active, payload.error || "request error");
       if (active) finishActiveRequest(payload.id, active.mapping, true);
     }
-    acknowledge?.();
   });
 }
 
@@ -368,7 +363,7 @@ function findMapping(id) {
 }
 
 function sendResponseError(ws, id, error) {
-  void sendTunnel(ws, { type: "response-error", id, error });
+  sendTunnelControl(ws, { type: "response-error", id, error });
 }
 
 function createLocalIdleTimer(ws, id, mapping, active) {
@@ -451,7 +446,7 @@ function handleRequestStart(ws, message) {
     }
     active.localRes = localRes;
     active.idle.reset();
-    void sendTunnel(ws, {
+    sendTunnelControl(ws, {
       type: "response-start",
       id: message.id,
       statusCode: localRes.statusCode || 200,
@@ -462,14 +457,14 @@ function handleRequestStart(ws, message) {
       localRes.pause();
       active.idle.reset();
       stats.bytesOut += chunk.length;
-      const sent = await sendTunnel(ws, encodeFrame(FRAME.RESPONSE_BODY, message.id, chunk));
+      const sent = await sendTunnelData(ws, encodeFrame(FRAME.RESPONSE_BODY, message.id, chunk));
       if (!sent) localReq.destroy(new Error("server tunnel is not available"));
       else localRes.resume();
     });
 
     localRes.on("end", () => {
       active.idle.reset();
-      void sendTunnel(ws, { type: "response-end", id: message.id });
+      sendTunnelControl(ws, { type: "response-end", id: message.id });
       finishActiveRequest(message.id, mapping);
     });
 

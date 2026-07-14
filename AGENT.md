@@ -216,22 +216,22 @@ Protocol messages and frames validate the 32-hex-character request id. Socket.IO
 
 `request-error` is also the cancellation message from the server to the client. When the public caller disconnects or a tunnel request times out, the client must destroy both the local `ClientRequest` and any active local response stream. If an error occurs after public response headers were sent, destroy the HTTP response instead of appending an error string to the response body; this makes truncation visible and avoids corrupting downloads.
 
-Backpressure is handled with per-event Socket.IO acknowledgements and:
+Body streaming uses separate Socket.IO binary events. Sender-side transport backpressure and receiver-side HTTP backpressure are handled with:
 
 ```text
-sendTunnel()
+sendTunnelData()
 writeStream()
 ```
 
 from `packages/shared/src/tunnel-transport.js` and `packages/shared/src/stream-protocol.js`.
 
-Tunnel event acknowledgement has a 30-second ceiling. Stream writes resolve on `drain`, `close`, or `error` so a closed destination cannot leave an unresolved promise.
+`sendTunnelData()` waits for the local Engine.IO `drain` event or Socket.IO disconnect; it does not wait for a remote per-chunk acknowledgement. Stream writes resolve on `drain`, `close`, or `error` so a closed destination cannot leave an unresolved promise.
 
 ## Connection Recovery
 
 Socket.IO/Engine.IO owns transport heartbeat and reconnect behavior. The client enables infinite reconnect attempts with exponential backoff and jitter. The base delay is the saved `reconnectMs`; `MAX_RECONNECT_DELAY_MS` defaults to 15 seconds. There is no custom application heartbeat, ping/pong watchdog, or hand-written reconnect loop.
 
-The tunnel still performs a business handshake: the client emits `hello` with its mappings and does not report the tunnel as verified until the server returns a valid tunnel event such as `mapping-status`. Every tunnel event uses a Socket.IO acknowledgement with a 30-second timeout to bound queued streaming data; this acknowledgement is flow control, not a liveness heartbeat.
+The tunnel still performs a business handshake: the client emits `hello` with its mappings and does not report the tunnel as verified until the server returns a valid control event such as `mapping-status`. Control events do not require acknowledgements. Request and response bodies use ordered binary events; request lifecycle cleanup still occurs on Socket.IO disconnect, without replay after reconnect.
 
 ## Timeout Semantics
 
