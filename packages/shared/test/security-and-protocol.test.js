@@ -12,9 +12,9 @@ import {
   decodeFrame,
   encodeFrame,
   isRequestId,
-  waitForWsBackpressure,
   writeStream
 } from "../src/stream-protocol.js";
+import { TUNNEL_EVENT, sendTunnel } from "../src/tunnel-transport.js";
 
 function mockResponse() {
   return {
@@ -105,10 +105,24 @@ test("stream frames validate request ids and frame types", () => {
   assert.equal(decodeFrame(Buffer.concat([Buffer.from([99]), Buffer.alloc(16)])), null);
 });
 
-test("backpressure and stream close resolve as failed writes", async () => {
-  const ws = { readyState: 1, bufferedAmount: 10 };
-  assert.equal(await waitForWsBackpressure(ws, 1, 5), false);
+test("Socket.IO tunnel sends require acknowledgements", async () => {
+  const socket = {
+    connected: true,
+    timeout() {
+      return this;
+    },
+    emit(event, payload, acknowledge) {
+      assert.equal(event, TUNNEL_EVENT);
+      assert.deepEqual(payload, { type: "hello" });
+      acknowledge();
+    }
+  };
+  assert.equal(await sendTunnel(socket, { type: "hello" }), true);
+  socket.connected = false;
+  assert.equal(await sendTunnel(socket, { type: "hello" }), false);
+});
 
+test("stream close resolves as a failed write", async () => {
   class ClosingStream extends EventEmitter {
     destroyed = false;
     writableEnded = false;

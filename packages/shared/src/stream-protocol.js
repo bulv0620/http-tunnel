@@ -1,9 +1,4 @@
 import crypto from "node:crypto";
-import { setTimeout as delay } from "node:timers/promises";
-
-const DEFAULT_WS_BUFFER_LIMIT = 4 * 1024 * 1024;
-const DEFAULT_WS_BACKPRESSURE_TIMEOUT_MS = 30000;
-const WS_OPEN = 1;
 
 export const FRAME = {
   REQUEST_BODY: 1,
@@ -37,24 +32,6 @@ export function decodeFrame(frame) {
     id: buffer.subarray(1, 17).toString("hex"),
     chunk: buffer.subarray(17)
   };
-}
-
-export async function waitForWsBackpressure(ws, limit = DEFAULT_WS_BUFFER_LIMIT, timeoutMs = DEFAULT_WS_BACKPRESSURE_TIMEOUT_MS) {
-  const startedAt = performance.now();
-  while (ws.readyState === WS_OPEN && ws.bufferedAmount > limit) {
-    if (performance.now() - startedAt >= timeoutMs) return false;
-    await delay(5);
-  }
-  return ws.readyState === WS_OPEN;
-}
-
-export async function sendWs(ws, payload, options) {
-  if (!ws || ws.readyState !== WS_OPEN) return false;
-  const writable = await waitForWsBackpressure(ws);
-  if (!writable) return false;
-  return new Promise((resolve) => {
-    ws.send(payload, options, (error) => resolve(!error));
-  });
 }
 
 export async function writeStream(stream, chunk) {

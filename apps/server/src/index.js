@@ -1,24 +1,19 @@
 import http from "node:http";
-import { WebSocketServer } from "ws";
+import { Server as SocketIOServer } from "socket.io";
 import { loadEnvFile } from "@http-tunnel/shared/env-file";
 import { clearSessions, createLoginRateLimiter, ensureAdmin, requireAuth, login, logout, currentUser } from "@http-tunnel/shared/auth";
 import { clientIp, redact } from "@http-tunnel/shared/audit";
 import { stripBaseUrl } from "@http-tunnel/shared/base-url";
 import { applyCors } from "@http-tunnel/shared/cors";
 import { addAuditLog, isConfigured, listAuditLogs, loadSettings, saveSettings } from "./db.js";
-import {
-  TUNNEL_HEARTBEAT_INTERVAL_MS,
-  TUNNEL_HEARTBEAT_LOOP_LAG_MS,
-  TUNNEL_HEARTBEAT_RECOVERY_MS,
-  TUNNEL_HEARTBEAT_STALE_MS
-} from "@http-tunnel/shared/heartbeat";
 import { json, readJson, toHeaderObject } from "@http-tunnel/shared/http-utils";
 import { createLogger } from "@http-tunnel/shared/logger";
 import { normalizeMappings } from "@http-tunnel/shared/mappings";
 import { hashPassword } from "@http-tunnel/shared/password";
 import { envBoolean, envList, envPositiveInteger } from "@http-tunnel/shared/runtime-config";
 import { serveStaticWeb } from "@http-tunnel/shared/static-web";
-import { FRAME, createRequestId, decodeFrame, encodeFrame, isRequestId, sendWs, writeStream } from "@http-tunnel/shared/stream-protocol";
+import { FRAME, createRequestId, decodeFrame, encodeFrame, isRequestId, writeStream } from "@http-tunnel/shared/stream-protocol";
+import { TUNNEL_EVENT, isTunnelConnected, sendTunnel } from "@http-tunnel/shared/tunnel-transport";
 
 loadEnvFile(".env.server");
 
@@ -50,7 +45,6 @@ const config = {
 ensureAdmin(config);
 
 const logger = createLogger("server");
-const WS_OPEN = 1;
 const pending = new Map();
 const mappingServers = new Map();
 const mappingSpecs = new Map();
@@ -58,6 +52,7 @@ const mappingStats = new Map();
 const mappingListenErrors = new Map();
 let client = null;
 let clientUpgradeInProgress = false;
+let clientUpgradeTimer = null;
 let mappings = [];
 
 function statsFor(id) {
@@ -112,11 +107,9 @@ function mappingStatusPayload() {
   }));
 }
 
-async function sendMappingStatus(ws = client) {
-  if (!ws || ws.readyState !== WS_OPEN || client !== ws || isClientHeartbeatTimedOut(ws)) return false;
-  const sent = await sendWs(ws, JSON.stringify({ type: "mapping-status", heartbeatVersion: 1, mappings: mappingStatusPayload() }));
-  if (sent) markClientActivity(ws);
-  return sent;
+async function sendMappingStatus(socket = client) {
+  if (!isClientConnected(socket) || client !== socket) return false;
+  return sendTunnel(socket, { type: "mapping-status", mappings: mappingStatusPayload() });
 }
 
 function stopRemovedMappings(nextMappings) {
@@ -175,127 +168,13 @@ function applyMappings(nextMappings) {
   for (const mapping of mappings) startMapping(mapping);
 }
 
-function clearClientHeartbeat(ws) {
-  clearInterval(ws.heartbeatInterval);
-  clearTimeout(ws.heartbeatTimeoutTimer);
-  ws.heartbeatInterval = null;
-  ws.heartbeatTimeoutTimer = null;
-  ws.awaitingPong = false;
-}
-
-function isClientHeartbeatTimedOut(ws = client) {
-  return Boolean(
-    ws?.lastHeartbeatMonotonicAt &&
-    performance.now() - ws.lastHeartbeatMonotonicAt >= TUNNEL_HEARTBEAT_STALE_MS
-  );
-}
-
-function isClientConnected(ws = client) {
-  return Boolean(ws && ws.readyState === WS_OPEN && !isClientHeartbeatTimedOut(ws));
-}
-
-function startClientHeartbeat(ws = client) {
-  if (!ws || ws.readyState !== WS_OPEN || client !== ws) return;
-  clearInterval(ws.heartbeatInterval);
-  ws.heartbeatInterval = setInterval(() => sendClientHeartbeat(ws), TUNNEL_HEARTBEAT_INTERVAL_MS);
-  ws.heartbeatInterval.unref?.();
-  scheduleClientHeartbeatTimeout(ws);
-  sendClientHeartbeat(ws);
-}
-
-function recoverHeartbeatAfterLoopPause(ws) {
-  const now = performance.now();
-  const loopElapsedMs = now - ws.lastHeartbeatLoopAt;
-  ws.lastHeartbeatLoopAt = now;
-  if (
-    loopElapsedMs < TUNNEL_HEARTBEAT_INTERVAL_MS + TUNNEL_HEARTBEAT_LOOP_LAG_MS ||
-    !isClientHeartbeatTimedOut(ws)
-  ) {
-    return false;
-  }
-
-  ws.lastHeartbeatMonotonicAt = now - TUNNEL_HEARTBEAT_STALE_MS + TUNNEL_HEARTBEAT_RECOVERY_MS;
-  logger.warn("heartbeat check resumed after local event loop pause", {
-    clientId: ws.clientId,
-    loopElapsedMs: Math.round(loopElapsedMs),
-    recoveryMs: TUNNEL_HEARTBEAT_RECOVERY_MS
-  });
-  scheduleClientHeartbeatTimeout(ws);
-  return true;
-}
-
-function markClientActivity(ws = client, { liveness = false } = {}) {
-  if (!ws || ws.readyState !== WS_OPEN || client !== ws) return;
-  ws.lastActivityAt = new Date().toISOString();
-  if (liveness) {
-    ws.lastHeartbeatAt = Date.now();
-    ws.lastHeartbeatMonotonicAt = performance.now();
-  }
-}
-
-function sendClientHeartbeat(ws) {
-  if (!ws || ws.readyState !== WS_OPEN || client !== ws) return;
-  const recoveredFromLoopPause = recoverHeartbeatAfterLoopPause(ws);
-  if (isClientHeartbeatTimedOut(ws) && !recoveredFromLoopPause) {
-    logger.warn("client heartbeat timed out", {
-      clientId: ws.clientId,
-      lastHeartbeatAt: ws.lastHeartbeatAt ? new Date(ws.lastHeartbeatAt).toISOString() : "",
-      timeoutMs: TUNNEL_HEARTBEAT_STALE_MS,
-      pending: pending.size,
-      bufferedAmount: ws.bufferedAmount
-    });
-    ws.terminate();
-    return;
-  }
-  const sentAt = Date.now();
-  ws.awaitingPong = true;
-  ws.lastPingAt = sentAt;
-  ws.lastPingAtIso = new Date(sentAt).toISOString();
-
-  try {
-    ws.ping(String(sentAt), (error) => {
-      if (error && client === ws) {
-        logger.warn("client heartbeat ping failed", { clientId: ws.clientId, error: error.message });
-        ws.terminate();
-      }
-    });
-  } catch (error) {
-    logger.warn("client heartbeat ping failed", { clientId: ws.clientId, error: error.message });
-    ws.terminate();
-  }
-}
-
-function scheduleClientHeartbeatTimeout(ws) {
-  clearTimeout(ws.heartbeatTimeoutTimer);
-  const elapsedMs = performance.now() - ws.lastHeartbeatMonotonicAt;
-  const remainingMs = Math.max(1, TUNNEL_HEARTBEAT_STALE_MS - elapsedMs);
-  ws.heartbeatTimeoutTimer = setTimeout(() => {
-    if (ws.readyState !== WS_OPEN || client !== ws) return;
-    if (recoverHeartbeatAfterLoopPause(ws)) {
-      sendClientHeartbeat(ws);
-      return;
-    }
-    if (!isClientHeartbeatTimedOut(ws)) {
-      scheduleClientHeartbeatTimeout(ws);
-      return;
-    }
-    logger.warn("client heartbeat timed out", {
-      clientId: ws.clientId,
-      lastHeartbeatAt: ws.lastHeartbeatAt ? new Date(ws.lastHeartbeatAt).toISOString() : "",
-      timeoutMs: TUNNEL_HEARTBEAT_STALE_MS,
-      pending: pending.size,
-      bufferedAmount: ws.bufferedAmount
-    });
-    ws.terminate();
-  }, remainingMs);
-  ws.heartbeatTimeoutTimer.unref?.();
+function isClientConnected(socket = client) {
+  return Boolean(socket && socket === client && isTunnelConnected(socket));
 }
 
 async function sendToClient(payload) {
   if (!isClientConnected()) return false;
-  const sent = await sendWs(client, JSON.stringify(payload));
-  if (sent) markClientActivity(client);
-  return sent;
+  return sendTunnel(client, payload);
 }
 
 function finishPending(id, errorMessage = "") {
@@ -415,9 +294,7 @@ async function handleMappedRequest(mapping, req, res) {
 
 async function sendToClientBinary(payload) {
   if (!isClientConnected()) return false;
-  const sent = await sendWs(client, payload, { binary: true });
-  if (sent) markClientActivity(client);
-  return sent;
+  return sendTunnel(client, payload);
 }
 
 function startResponse(payload) {
@@ -482,11 +359,7 @@ function statusPayload(req) {
     client: isClientConnected() ? {
       id: client.clientId,
       connectedAt: client.connectedAt,
-      latencyMs: client.latencyMs ?? null,
-      lastPingAt: client.lastPingAtIso || "",
-      lastPongAt: client.lastPongAt || "",
-      lastHeartbeatAt: client.lastHeartbeatAt ? new Date(client.lastHeartbeatAt).toISOString() : "",
-      lastActivityAt: client.lastActivityAt || ""
+      transport: client.conn.transport.name
     } : null,
     mappings: mappings.map((mapping) => ({ ...mapping, status: mappingStatus(mapping), statusMessage: mappingStatusMessage(mapping), stats: updateRates(statsFor(mapping.id)) })),
     pending: pending.size,
@@ -511,8 +384,9 @@ function publicConfig() {
 }
 
 function closeClient(code, reason) {
-  if (!client || client.readyState !== WS_OPEN) return;
-  client.close(code, reason);
+  if (!isClientConnected()) return;
+  logger.info("closing client connection", { clientId: client.clientId, code, reason });
+  client.conn.close();
 }
 
 function applySavedSettings(next) {
@@ -628,27 +502,31 @@ const server = http.createServer({ maxHeaderSize: config.maxHeaderBytes }, async
   json(res, 404, { ok: false, error: "not found" });
 });
 
-const wss = new WebSocketServer({ noServer: true, maxPayload: config.maxWsPayloadBytes, perMessageDeflate: false });
+const io = new SocketIOServer(server, {
+  path: "/_tunnel/ws",
+  transports: ["websocket"],
+  allowUpgrades: false,
+  maxHttpBufferSize: config.maxWsPayloadBytes,
+  perMessageDeflate: false
+});
 
-server.on("upgrade", (req, socket, head) => {
+server.prependListener("upgrade", (req, socket) => {
   const url = new URL(req.url, "http://localhost");
-  if (url.pathname !== "/_tunnel/ws") {
-    socket.destroy();
-    return;
-  }
-
-  const clientId = url.searchParams.get("clientId") || "";
+  if (url.pathname.replace(/\/$/, "") !== "/_tunnel/ws") return;
+  const clientId = url.searchParams.get("clientId") || "client";
   const rejectTunnel = (statusCode, statusText, event, data = {}) => {
     addAuditLog(event, { ip: clientIp(req, config.trustProxy), data: { clientId, ...data } });
-    socket.write(`HTTP/1.1 ${statusCode} ${statusText}\r\n\r\n`);
-    socket.destroy();
+    socket.end(
+      `HTTP/1.1 ${statusCode} ${statusText}\r\n` +
+      "Connection: close\r\n" +
+      "Content-Length: 0\r\n\r\n"
+    );
   };
 
   if (!isConfigured(config) || !config.tunnelToken) {
     rejectTunnel(503, "Service Unavailable", "tunnel_rejected_unconfigured");
     return;
   }
-
   const auth = String(req.headers.authorization || "");
   const headerToken = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
   const token = headerToken || url.searchParams.get("token") || "";
@@ -656,121 +534,75 @@ server.on("upgrade", (req, socket, head) => {
     rejectTunnel(401, "Unauthorized", "tunnel_auth_failed");
     return;
   }
-
-  if (clientUpgradeInProgress) {
+  if (clientUpgradeInProgress || isClientConnected()) {
     rejectTunnel(409, "Conflict", "tunnel_client_rejected", { reason: "client already connected" });
     return;
   }
-  if (client && client.readyState === WS_OPEN) {
-    if (isClientConnected()) {
-      rejectTunnel(409, "Conflict", "tunnel_client_rejected", { reason: "client already connected" });
-      return;
-    }
-    logger.warn("replacing stale client connection", { clientId: client.clientId });
-    client.terminate();
-    client = null;
-  }
 
   clientUpgradeInProgress = true;
-  try {
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      ws.clientId = clientId || "client";
-      ws.connectedAt = new Date().toISOString();
-      ws.awaitingPong = false;
-      ws.lastPongAt = "";
-      ws.supportsAppHeartbeat = false;
-      ws.lastHeartbeatAt = Date.now();
-      ws.lastHeartbeatMonotonicAt = performance.now();
-      ws.lastHeartbeatLoopAt = performance.now();
-      ws.lastPingAt = 0;
-      ws.lastPingAtIso = "";
-      ws.lastActivityAt = "";
-      ws.latencyMs = null;
-      wss.emit("connection", ws, req);
-    });
-  } catch {
+  clearTimeout(clientUpgradeTimer);
+  clientUpgradeTimer = setTimeout(() => {
     clientUpgradeInProgress = false;
-    socket.destroy();
-  }
+  }, 10000);
+  clientUpgradeTimer.unref?.();
+  req.tunnelClientId = clientId;
 });
 
-wss.on("connection", (ws) => {
+io.on("connection", (socket) => {
   clientUpgradeInProgress = false;
-  client = ws;
-  markClientActivity(ws);
-  startClientHeartbeat(ws);
-  logger.info("client connected", { clientId: ws.clientId });
-  addAuditLog("client_connected", { actor: ws.clientId, data: { clientId: ws.clientId } });
+  clearTimeout(clientUpgradeTimer);
+  socket.clientId = socket.request.tunnelClientId || String(socket.handshake.query.clientId || "client");
+  socket.connectedAt = new Date().toISOString();
+  client = socket;
+  logger.info("client connected", { clientId: socket.clientId, transport: socket.conn.transport.name });
+  addAuditLog("client_connected", { actor: socket.clientId, data: { clientId: socket.clientId } });
 
-  ws.on("pong", (payload) => {
-    if (client !== ws) return;
-    markClientActivity(ws, { liveness: !ws.supportsAppHeartbeat });
-    ws.awaitingPong = false;
-    clearTimeout(ws.heartbeatTimeoutTimer);
-    ws.heartbeatTimeoutTimer = null;
-    const sentAt = Number(payload.toString());
-    if (Number.isFinite(sentAt)) ws.latencyMs = Date.now() - sentAt;
-    ws.lastPongAt = new Date().toISOString();
-    scheduleClientHeartbeatTimeout(ws);
-  });
-
-  ws.on("ping", () => {
-    if (client !== ws) return;
-    markClientActivity(ws);
-  });
-
-  ws.on("message", (raw, isBinary) => {
-    if (client !== ws) return;
-    markClientActivity(ws, { liveness: true });
-    if (isBinary) {
-      const frame = decodeFrame(raw);
-      if (frame?.type === FRAME.RESPONSE_BODY) void writeResponseBody(frame.id, frame.chunk);
+  socket.on(TUNNEL_EVENT, async (payload, acknowledge) => {
+    if (client !== socket) {
+      acknowledge?.();
       return;
     }
-
-    let payload;
-    try {
-      payload = JSON.parse(raw.toString());
-    } catch {
+    if (Buffer.isBuffer(payload)) {
+      const frame = decodeFrame(payload);
+      if (frame?.type === FRAME.RESPONSE_BODY) await writeResponseBody(frame.id, frame.chunk);
+      acknowledge?.();
+      return;
+    }
+    if (!payload || typeof payload !== "object") {
+      acknowledge?.();
       return;
     }
     if (payload.type === "hello" || payload.type === "mappings") {
-      if (payload.type === "hello" && Number(payload.heartbeatVersion) >= 1) ws.supportsAppHeartbeat = true;
-      applyMappings(payload.mappings || []);
+      if (!Array.isArray(payload.mappings)) {
+        acknowledge?.();
+        return;
+      }
+      applyMappings(payload.mappings);
       logger.info("mappings updated", { count: mappings.length });
-      addAuditLog("mappings_updated", { actor: ws.clientId, data: { count: mappings.length } });
-      void sendMappingStatus(ws);
-      return;
-    }
-    if (payload.type === "heartbeat" && typeof payload.nonce === "string" && payload.nonce.length <= 64) {
-      ws.supportsAppHeartbeat = true;
-      void sendWs(ws, JSON.stringify({ type: "heartbeat-ack", nonce: payload.nonce }));
+      addAuditLog("mappings_updated", { actor: socket.clientId, data: { count: mappings.length } });
+      acknowledge?.();
+      void sendMappingStatus(socket);
       return;
     }
     if (payload.type === "response-start" && isRequestId(payload.id)) startResponse(payload);
-    if (payload.type === "response-end" && isRequestId(payload.id)) void endResponse(payload);
-    if (payload.type === "response-error" && isRequestId(payload.id)) void endResponse(payload);
+    if (payload.type === "response-end" && isRequestId(payload.id)) await endResponse(payload);
+    if (payload.type === "response-error" && isRequestId(payload.id)) await endResponse(payload);
+    acknowledge?.();
   });
 
-  ws.on("error", (error) => {
-    if (client !== ws) {
-      logger.info("stale client connection error ignored", { error: error.message });
-      return;
-    }
-    logger.warn("client connection error", { clientId: ws.clientId, error: error.message });
-    ws.terminate();
+  socket.on("error", (error) => {
+    logger.warn("client socket error", { clientId: socket.clientId, error: error.message });
   });
 
-  ws.on("close", () => {
-    const wasCurrent = client === ws;
-    clearClientHeartbeat(ws);
+  socket.on("disconnect", (reason) => {
+    const wasCurrent = client === socket;
     if (wasCurrent) {
       client = null;
       failPending("client disconnected");
-      logger.warn("client disconnected", { clientId: ws.clientId });
-      addAuditLog("client_disconnected", { actor: ws.clientId, data: { clientId: ws.clientId } });
+      logger.warn("client disconnected", { clientId: socket.clientId, reason });
+      addAuditLog("client_disconnected", { actor: socket.clientId, data: { clientId: socket.clientId, reason } });
     } else {
-      logger.info("stale client connection closed", { clientId: ws.clientId });
+      logger.info("stale client connection closed", { clientId: socket.clientId, reason });
     }
   });
 });

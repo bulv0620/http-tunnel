@@ -4,8 +4,8 @@ Node.js monorepo HTTP 内网穿透服务。
 
 ```text
 apps/web      Vue 3 + Element Plus 管理前端
-apps/server   公网服务端 API + WebSocket 隧道入口 + 映射端口监听
-apps/client   内网客户端 API + WebSocket 隧道连接器
+apps/server   公网服务端 API + Socket.IO 隧道入口 + 映射端口监听
+apps/client   内网客户端 API + Socket.IO 隧道连接器
 packages/shared  server/client 共享代码
 ```
 
@@ -16,7 +16,7 @@ packages/shared  server/client 共享代码
 ```text
 用户请求服务端映射端口
   -> apps/server
-    -> WebSocket 流式传输
+    -> Socket.IO（WebSocket transport）流式传输
       -> apps/client
         -> 内网 HTTP 服务
 ```
@@ -27,7 +27,7 @@ packages/shared  server/client 共享代码
 - 客户端只能连接一个服务端。
 - 端口映射由客户端管理。
 - 服务端只展示客户端上报的映射，不允许修改映射。
-- 请求和响应 body 通过 WebSocket 二进制帧流式传输。
+- 请求和响应 body 通过 Socket.IO 二进制事件流式传输。
 
 ## 配置与数据
 
@@ -57,15 +57,13 @@ MAX_CONCURRENT_REQUESTS_PER_MAPPING=64
 MAX_WS_PAYLOAD_BYTES=2097152
 MAX_HEADER_BYTES=16384
 
-# 客户端到服务端的端到端应用层探测与最大重连退避
-TUNNEL_PROBE_INTERVAL_MS=5000
-TUNNEL_PROBE_TIMEOUT_MS=10000
+# Socket.IO 最大重连退避
 MAX_RECONNECT_DELAY_MS=15000
 ```
 
 `TRUST_PROXY=true` 后才会信任 `X-Forwarded-For` 和 `X-Forwarded-Proto`。如果管理页面与 API 不同源，必须把完整 Origin 加入 `CORS_ORIGINS`；不要配置不受信任的来源。
 
-隧道使用双向存活检测：服务端保留 WebSocket `ping/pong` 用于链路延迟，但端到端存活只由应用层心跳或业务消息确认。客户端每 5 秒发送一次端到端应用层探测，并在探测实际写入连接后等待最多 10 秒。应用层探测必须到达 VPS 进程并收到确认，不依赖 CDN 是否及时传递 TCP/WebSocket `close`，也不会被 CDN 自己回复的控制帧误导。持续有效的隧道业务消息也会刷新存活状态，避免大流量期间仅因控制帧延迟而误断。已验证连接首次失联会立即重连；持续失败才进入指数退避，默认最高 15 秒。
+隧道的连接心跳和自动重连由 Socket.IO/Engine.IO 管理。客户端启用无限重连、指数退避和随机抖动，基础延迟使用页面中的 `reconnectMs`，最大延迟默认 15 秒。项目不再发送自定义应用层心跳。隧道业务事件仍要求接收端 ACK，并设置 30 秒发送超时，用于限制流式传输排队和保留请求级失败处理。
 
 业务配置和映射数据存到 SQLite：
 
@@ -515,6 +513,6 @@ VITE_API_BASE=http://127.0.0.1:12500
 - `PUT /api/mappings/:id`
 - `DELETE /api/mappings/:id`
 
-服务端 WebSocket：
+服务端 Socket.IO（仅启用 WebSocket transport）：
 
 - `/_tunnel/ws`

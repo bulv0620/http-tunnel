@@ -1,18 +1,10 @@
 import http from "node:http";
 import crypto from "node:crypto";
-import { WebSocket } from "ws";
+import { io } from "socket.io-client";
 import { loadEnvFile } from "@http-tunnel/shared/env-file";
 import { clearSessions, createLoginRateLimiter, ensureAdmin, requireAuth, login, logout, currentUser } from "@http-tunnel/shared/auth";
 import { stripBaseUrl } from "@http-tunnel/shared/base-url";
 import { applyCors } from "@http-tunnel/shared/cors";
-import {
-  TUNNEL_ACTIVE_PROBE_INTERVAL_MS,
-  TUNNEL_ACTIVE_PROBE_TIMEOUT_MS,
-  TUNNEL_HEARTBEAT_CHECK_MS,
-  TUNNEL_HEARTBEAT_LOOP_LAG_MS,
-  TUNNEL_HEARTBEAT_RECOVERY_MS,
-  TUNNEL_HEARTBEAT_STALE_MS
-} from "@http-tunnel/shared/heartbeat";
 import {
   createMapping as createStoredMapping,
   deleteMapping as deleteStoredMapping,
@@ -28,7 +20,8 @@ import { mappingTarget } from "@http-tunnel/shared/mappings";
 import { hashPassword } from "@http-tunnel/shared/password";
 import { envBoolean, envList, envPositiveInteger } from "@http-tunnel/shared/runtime-config";
 import { serveStaticWeb } from "@http-tunnel/shared/static-web";
-import { FRAME, decodeFrame, encodeFrame, isRequestId, sendWs, writeStream } from "@http-tunnel/shared/stream-protocol";
+import { FRAME, decodeFrame, encodeFrame, isRequestId, writeStream } from "@http-tunnel/shared/stream-protocol";
+import { TUNNEL_EVENT, isTunnelConnected, sendTunnel } from "@http-tunnel/shared/tunnel-transport";
 import { validatePort } from "@http-tunnel/shared/validators";
 
 loadEnvFile(".env.client");
@@ -45,9 +38,7 @@ const listenConfig = {
   maxConcurrentRequestsPerMapping: envPositiveInteger("MAX_CONCURRENT_REQUESTS_PER_MAPPING", 64),
   maxWsPayloadBytes: envPositiveInteger("MAX_WS_PAYLOAD_BYTES", 2 * 1024 * 1024),
   maxHeaderBytes: envPositiveInteger("MAX_HEADER_BYTES", 16 * 1024),
-  maxReconnectDelayMs: envPositiveInteger("MAX_RECONNECT_DELAY_MS", 15000, { min: 500 }),
-  serverProbeIntervalMs: envPositiveInteger("TUNNEL_PROBE_INTERVAL_MS", TUNNEL_ACTIVE_PROBE_INTERVAL_MS, { min: 500 }),
-  serverProbeTimeoutMs: envPositiveInteger("TUNNEL_PROBE_TIMEOUT_MS", TUNNEL_ACTIVE_PROBE_TIMEOUT_MS, { min: 500 })
+  maxReconnectDelayMs: envPositiveInteger("MAX_RECONNECT_DELAY_MS", 15000, { min: 500 })
 };
 const config = {
   ...listenConfig,
@@ -61,27 +52,12 @@ const config = {
 ensureAdmin(config);
 
 const logger = createLogger("client");
-const WS_OPEN = 1;
-const WS_CLOSING = 2;
-const RESTART_FORCE_CLOSE_MS = 1000;
-const RESTART_RESUME_MS = 2000;
 const RECONNECT_JITTER_RATIO = 0.2;
-const STABLE_CONNECTION_MS = 30000;
-let currentWs = null;
-let reconnectNow;
-let wakeReconnectDelay;
-let skipNextReconnectDelay = false;
+let currentSocket = null;
 let lastError = "";
-let lastServerPingAt = "";
-let lastServerActivityAt = 0;
-let lastServerActivityMonotonicAt = 0;
 let connectorStarted = false;
 let reconnectAttempt = 0;
-let reconnectDelayMs = 0;
-let nextReconnectAt = "";
-let lastServerProbeAt = "";
-let lastServerProbeAckAt = "";
-let serverProbeLatencyMs = null;
+let connectedAt = "";
 const activeRequests = new Map();
 const mappingStats = new Map();
 const remoteMappingStatuses = new Map();
@@ -233,10 +209,30 @@ function validateMappingInput(body, currentId = "") {
   };
 }
 
-function buildConnectUrl() {
+function buildConnectOptions() {
   const url = new URL(config.serverUrl);
-  url.searchParams.set("clientId", config.clientId);
-  return url;
+  const path = url.pathname;
+  url.protocol = url.protocol === "wss:" ? "https:" : "http:";
+  url.pathname = "/";
+  url.search = "";
+  url.hash = "";
+  return {
+    origin: url.origin,
+    options: {
+      path,
+      transports: ["websocket"],
+      upgrade: false,
+      auth: { clientId: config.clientId },
+      query: { clientId: config.clientId },
+      extraHeaders: connectHeaders(),
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: config.reconnectMs,
+      reconnectionDelayMax: Math.max(config.reconnectMs, config.maxReconnectDelayMs),
+      randomizationFactor: RECONNECT_JITTER_RATIO,
+      transportOptions: { websocket: { perMessageDeflate: false } }
+    }
+  };
 }
 
 function connectHeaders() {
@@ -244,223 +240,116 @@ function connectHeaders() {
 }
 
 function sendMappings() {
-  if (!currentWs || currentWs.readyState !== WS_OPEN) return;
-  void sendWs(currentWs, JSON.stringify({ type: "mappings", mappings: config.mappings }));
+  if (!isTunnelConnected(currentSocket)) return;
+  void sendTunnel(currentSocket, { type: "mappings", mappings: config.mappings });
 }
 
 function isConnected() {
-  return currentWs?.readyState === WS_OPEN && currentWs.serverVerified === true && !isServerHeartbeatStale(currentWs);
+  return isTunnelConnected(currentSocket) && currentSocket.serverVerified === true;
 }
 
-function markServerActivity(ws = currentWs, options = {}) {
-  if (!ws || currentWs !== ws) return;
-  lastServerActivityAt = Date.now();
-  lastServerActivityMonotonicAt = performance.now();
-  if (options.verified !== false) {
-    if (!ws.serverVerified) {
-      ws.serverVerified = true;
-      ws.serverVerifiedAt = performance.now();
-      reconnectAttempt = 0;
-      logger.info("server connection verified", { serverUrl: config.serverUrl });
-    }
-    lastError = "";
+function verifyServerConnection(socket) {
+  if (currentSocket !== socket || socket.serverVerified) return;
+  socket.serverVerified = true;
+  reconnectAttempt = 0;
+  lastError = "";
+  logger.info("server connection verified", { serverUrl: config.serverUrl });
+}
+
+function restartConnection(reason = "connection restart requested") {
+  const socket = currentSocket;
+  if (socket) {
+    logger.info("restarting server connection", { reason });
+    failActiveRequests(socket, reason);
+    socket.removeAllListeners();
+    socket.io.removeAllListeners();
+    socket.disconnect();
+    currentSocket = null;
   }
-  if (options.ping) lastServerPingAt = new Date().toISOString();
-}
-
-function resolveServerProbe(ws, nonce = "") {
-  const probe = ws?.serverProbe;
-  if (!probe || (nonce && probe.nonce !== nonce)) return;
-  clearTimeout(ws.serverProbeTimeoutTimer);
-  ws.serverProbeTimeoutTimer = null;
-  ws.serverProbe = null;
-  if (nonce) {
-    lastServerProbeAckAt = new Date().toISOString();
-    serverProbeLatencyMs = Math.max(0, Math.round(performance.now() - probe.startedAt));
-  }
-}
-
-async function sendServerProbe(ws) {
-  if (currentWs !== ws || ws.readyState !== WS_OPEN || ws.serverProbe || ws.serverProbeWriteInFlight) return;
-  const nonce = crypto.randomBytes(12).toString("hex");
-  const probe = { nonce, startedAt: performance.now() };
-  ws.serverProbe = probe;
-  ws.serverProbeWriteInFlight = true;
-  lastServerProbeAt = new Date().toISOString();
-  const sent = await sendWs(ws, JSON.stringify({ type: "heartbeat", nonce }));
-  ws.serverProbeWriteInFlight = false;
-  if (currentWs !== ws || ws.serverProbe !== probe) return;
-  if (!sent) {
-    lastError = "server heartbeat probe send failed";
-    skipNextReconnectDelay = ws.serverVerified === true;
-    ws.terminate();
-    return;
-  }
-  if (!ws.serverSupportsAppHeartbeat) {
-    ws.serverProbe = null;
-    return;
-  }
-  ws.serverProbeTimeoutTimer = setTimeout(() => {
-    if (currentWs !== ws || ws.serverProbe !== probe || ws.readyState !== WS_OPEN) return;
-    lastError = "server heartbeat probe timed out";
-    logger.warn("server heartbeat probe timed out", {
-      timeoutMs: config.serverProbeTimeoutMs,
-      bufferedAmount: ws.bufferedAmount
-    });
-    skipNextReconnectDelay = ws.serverVerified === true;
-    ws.terminate();
-  }, config.serverProbeTimeoutMs);
-  ws.serverProbeTimeoutTimer.unref?.();
-}
-
-function startServerActiveProbe(ws) {
-  clearInterval(ws.serverProbeInterval);
-  ws.serverProbe = null;
-  ws.serverProbeWriteInFlight = false;
-  ws.serverProbeInterval = setInterval(() => void sendServerProbe(ws), config.serverProbeIntervalMs);
-  ws.serverProbeInterval.unref?.();
-  void sendServerProbe(ws);
-}
-
-function clearServerActiveProbe(ws) {
-  clearInterval(ws.serverProbeInterval);
-  clearTimeout(ws.serverProbeTimeoutTimer);
-  ws.serverProbeInterval = null;
-  ws.serverProbeTimeoutTimer = null;
-  ws.serverProbe = null;
-  ws.serverProbeWriteInFlight = false;
-}
-
-function isServerHeartbeatStale(ws = currentWs) {
-  if (!ws || ws.readyState !== WS_OPEN) return false;
-  if (!lastServerActivityMonotonicAt) return false;
-  return performance.now() - lastServerActivityMonotonicAt >= TUNNEL_HEARTBEAT_STALE_MS;
-}
-
-function startServerHeartbeatWatchdog(ws) {
-  const check = () => {
-    if (currentWs !== ws || ws.readyState !== WS_OPEN) return;
-    const now = performance.now();
-    const checkLagMs = now - ws.lastHeartbeatWatchdogAt;
-    ws.lastHeartbeatWatchdogAt = now;
-    if (isServerHeartbeatStale(ws)) {
-      if (checkLagMs >= TUNNEL_HEARTBEAT_CHECK_MS + TUNNEL_HEARTBEAT_LOOP_LAG_MS) {
-        lastServerActivityMonotonicAt =
-          now - TUNNEL_HEARTBEAT_STALE_MS + TUNNEL_HEARTBEAT_RECOVERY_MS;
-        logger.warn("heartbeat watchdog resumed after local event loop pause", {
-          checkLagMs: Math.round(checkLagMs),
-          recoveryMs: TUNNEL_HEARTBEAT_RECOVERY_MS
-        });
-        try {
-          ws.ping(String(Date.now()));
-        } catch (error) {
-          lastError = error.message;
-          ws.terminate();
-          return;
-        }
-      } else {
-        lastError = "server heartbeat timed out";
-        logger.warn("server heartbeat timed out", {
-          staleMs: Math.round(now - lastServerActivityMonotonicAt),
-          timeoutMs: TUNNEL_HEARTBEAT_STALE_MS,
-          bufferedAmount: ws.bufferedAmount
-        });
-        ws.terminate();
-        return;
-      }
-    }
-    ws.serverHeartbeatTimer = setTimeout(check, TUNNEL_HEARTBEAT_CHECK_MS);
-    ws.serverHeartbeatTimer.unref?.();
-  };
-  clearTimeout(ws.serverHeartbeatTimer);
-  ws.lastHeartbeatWatchdogAt = performance.now();
-  ws.serverHeartbeatTimer = setTimeout(check, TUNNEL_HEARTBEAT_CHECK_MS);
-  ws.serverHeartbeatTimer.unref?.();
-}
-
-function clearServerHeartbeatWatchdog(ws) {
-  clearTimeout(ws.serverHeartbeatTimer);
-  ws.serverHeartbeatTimer = null;
-}
-
-function wakeConnector() {
-  if (reconnectNow) reconnectNow();
-  if (wakeReconnectDelay) wakeReconnectDelay();
-}
-
-function restartConnection(reason = "connection restart requested", options = {}) {
-  skipNextReconnectDelay = !wakeReconnectDelay;
-  const ws = currentWs;
-  if (!ws) {
-    wakeConnector();
-    return;
-  }
-
-  let done = false;
-  let forceTimer;
-  let resumeTimer;
-  const resume = () => {
-    if (done) return;
-    done = true;
-    clearTimeout(forceTimer);
-    clearTimeout(resumeTimer);
-    wakeConnector();
-  };
-
-  ws.once("close", resume);
-  try {
-    if (ws.readyState === WS_OPEN || ws.readyState === WS_CLOSING) ws.close(4001, reason);
-    else ws.terminate();
-  } catch {
-    ws.terminate();
-  }
-
-  if (options.force) {
-    forceTimer = setTimeout(() => {
-      if (!done && ws.readyState !== WebSocket.CLOSED) ws.terminate();
-    }, RESTART_FORCE_CLOSE_MS);
-  }
-  resumeTimer = setTimeout(resume, options.force ? RESTART_RESUME_MS : config.reconnectMs);
-}
-
-function calculateReconnectDelay(attempt) {
-  const baseDelayMs = Math.max(1, config.reconnectMs);
-  if (attempt <= 1) return baseDelayMs;
-  const maximumDelayMs = Math.max(baseDelayMs, config.maxReconnectDelayMs);
-  const exponentialDelayMs = Math.min(maximumDelayMs, baseDelayMs * (2 ** Math.min(attempt - 1, 10)));
-  const jitterMs = exponentialDelayMs * RECONNECT_JITTER_RATIO * Math.random();
-  return Math.round(Math.min(maximumDelayMs, exponentialDelayMs + jitterMs));
-}
-
-async function waitBeforeReconnect() {
-  if (skipNextReconnectDelay) {
-    skipNextReconnectDelay = false;
-    reconnectAttempt = 0;
-    reconnectDelayMs = 0;
-    nextReconnectAt = "";
-    return;
-  }
-  reconnectDelayMs = calculateReconnectDelay(reconnectAttempt);
-  nextReconnectAt = new Date(Date.now() + reconnectDelayMs).toISOString();
-  logger.info("reconnect scheduled", { attempt: reconnectAttempt, reconnectDelayMs, nextReconnectAt });
-  let wake;
-  await new Promise((resolve) => {
-    const timer = setTimeout(resolve, reconnectDelayMs);
-    wake = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    wakeReconnectDelay = wake;
-  });
-  if (wakeReconnectDelay === wake) wakeReconnectDelay = null;
-  reconnectDelayMs = 0;
-  nextReconnectAt = "";
+  connectorStarted = false;
+  reconnectAttempt = 0;
+  connectedAt = "";
+  startConnector();
 }
 
 function startConnector() {
   if (connectorStarted || !isConfigured(config)) return;
   connectorStarted = true;
-  connectForever();
+  const { origin, options } = buildConnectOptions();
+  const socket = io(origin, options);
+  currentSocket = socket;
+
+  socket.on("connect", () => {
+    socket.serverVerified = false;
+    reconnectAttempt = 0;
+    connectedAt = new Date().toISOString();
+    lastError = "";
+    logger.info("socket.io connected", { serverUrl: config.serverUrl, mappings: config.mappings.length });
+    void sendTunnel(socket, { type: "hello", mappings: config.mappings });
+  });
+  socket.on("connect_error", (error) => {
+    lastError = error.message;
+    logger.error("connection error", { error: error.message });
+  });
+  socket.io.on("reconnect_attempt", (attempt) => {
+    reconnectAttempt = attempt;
+    logger.info("socket.io reconnect attempt", { attempt });
+  });
+  socket.io.on("reconnect_error", (error) => {
+    lastError = error.message;
+  });
+  socket.on("disconnect", (reason) => {
+    if (currentSocket !== socket) return;
+    remoteMappingStatuses.clear();
+    failActiveRequests(socket, "server disconnected");
+    connectedAt = "";
+    logger.warn("disconnected from server", { reason });
+  });
+  socket.on(TUNNEL_EVENT, async (payload, acknowledge) => {
+    if (currentSocket !== socket) {
+      acknowledge?.();
+      return;
+    }
+    if (Buffer.isBuffer(payload)) {
+      const frame = decodeFrame(payload);
+      if (frame?.type === FRAME.REQUEST_BODY) {
+        verifyServerConnection(socket);
+        await handleRequestBody(frame.id, frame.chunk);
+      }
+      acknowledge?.();
+      return;
+    }
+    if (!payload || typeof payload !== "object") {
+      acknowledge?.();
+      return;
+    }
+    if (payload.type === "request-start" && isRequestId(payload.id)) {
+      verifyServerConnection(socket);
+      handleRequestStart(socket, payload);
+    }
+    if (payload.type === "request-end" && isRequestId(payload.id)) {
+      verifyServerConnection(socket);
+      await handleRequestEnd(socket, payload.id);
+    }
+    if (payload.type === "mapping-status") {
+      if (!Array.isArray(payload.mappings)) {
+        acknowledge?.();
+        return;
+      }
+      verifyServerConnection(socket);
+      remoteMappingStatuses.clear();
+      for (const item of payload.mappings) {
+        if (item.id) remoteMappingStatuses.set(item.id, item);
+      }
+    }
+    if (payload.type === "request-error" && isRequestId(payload.id)) {
+      verifyServerConnection(socket);
+      const active = activeRequests.get(payload.id);
+      if (active) destroyActiveRequest(active, payload.error || "request error");
+      if (active) finishActiveRequest(payload.id, active.mapping, true);
+    }
+    acknowledge?.();
+  });
 }
 
 function mappingStatus(mapping) {
@@ -479,7 +368,7 @@ function findMapping(id) {
 }
 
 function sendResponseError(ws, id, error) {
-  void sendWs(ws, JSON.stringify({ type: "response-error", id, error }));
+  void sendTunnel(ws, { type: "response-error", id, error });
 }
 
 function createLocalIdleTimer(ws, id, mapping, active) {
@@ -562,25 +451,25 @@ function handleRequestStart(ws, message) {
     }
     active.localRes = localRes;
     active.idle.reset();
-    void sendWs(ws, JSON.stringify({
+    void sendTunnel(ws, {
       type: "response-start",
       id: message.id,
       statusCode: localRes.statusCode || 200,
       headers: toHeaderObject(localRes.headers)
-    }));
+    });
 
     localRes.on("data", async (chunk) => {
       localRes.pause();
       active.idle.reset();
       stats.bytesOut += chunk.length;
-      const sent = await sendWs(ws, encodeFrame(FRAME.RESPONSE_BODY, message.id, chunk), { binary: true });
-      if (!sent) localReq.destroy(new Error("server websocket is not available"));
+      const sent = await sendTunnel(ws, encodeFrame(FRAME.RESPONSE_BODY, message.id, chunk));
+      if (!sent) localReq.destroy(new Error("server tunnel is not available"));
       else localRes.resume();
     });
 
     localRes.on("end", () => {
       active.idle.reset();
-      void sendWs(ws, JSON.stringify({ type: "response-end", id: message.id }));
+      void sendTunnel(ws, { type: "response-end", id: message.id });
       finishActiveRequest(message.id, mapping);
     });
 
@@ -629,108 +518,6 @@ async function handleRequestEnd(ws, id) {
   }
 }
 
-async function connectForever() {
-  while (true) {
-    const url = buildConnectUrl();
-
-    await new Promise((resolve) => {
-      const ws = new WebSocket(url, {
-        headers: connectHeaders(),
-        maxPayload: config.maxWsPayloadBytes,
-        perMessageDeflate: false
-      });
-      currentWs = ws;
-      reconnectNow = resolve;
-
-      ws.on("open", () => {
-        ws.serverVerified = false;
-        ws.serverVerifiedAt = 0;
-        ws.serverSupportsAppHeartbeat = false;
-        markServerActivity(ws, { verified: false });
-        startServerHeartbeatWatchdog(ws);
-        startServerActiveProbe(ws);
-        logger.info("websocket opened", { serverUrl: url.origin + url.pathname, mappings: config.mappings.length });
-        void sendWs(ws, JSON.stringify({ type: "hello", heartbeatVersion: 1, mappings: config.mappings }));
-      });
-      ws.on("ping", () => {
-        if (currentWs !== ws) return;
-        markServerActivity(ws, { ping: true, verified: false });
-      });
-      ws.on("pong", () => {
-        if (currentWs !== ws) return;
-        markServerActivity(ws, { verified: false });
-      });
-      ws.on("message", (raw, isBinary) => {
-        if (currentWs !== ws) return;
-        markServerActivity(ws);
-        if (isBinary) {
-          resolveServerProbe(ws);
-          const frame = decodeFrame(raw);
-          if (frame?.type === FRAME.REQUEST_BODY) void handleRequestBody(frame.id, frame.chunk);
-          return;
-        }
-
-        let message;
-        try {
-          message = JSON.parse(raw.toString());
-        } catch {
-          resolveServerProbe(ws);
-          return;
-        }
-        if (message.type === "heartbeat-ack" && typeof message.nonce === "string") {
-          ws.serverSupportsAppHeartbeat = true;
-          resolveServerProbe(ws, message.nonce);
-          return;
-        }
-        if (Number(message.heartbeatVersion) >= 1) ws.serverSupportsAppHeartbeat = true;
-        resolveServerProbe(ws);
-        if (message.type === "request-start" && isRequestId(message.id)) handleRequestStart(ws, message);
-        if (message.type === "request-end" && isRequestId(message.id)) handleRequestEnd(ws, message.id);
-        if (message.type === "mapping-status") {
-          remoteMappingStatuses.clear();
-          for (const item of message.mappings || []) {
-            if (item.id) remoteMappingStatuses.set(item.id, item);
-          }
-        }
-        if (message.type === "request-error" && isRequestId(message.id)) {
-          const active = activeRequests.get(message.id);
-          if (active) destroyActiveRequest(active, message.error || "request error");
-          if (active) finishActiveRequest(message.id, active.mapping, true);
-        }
-      });
-      ws.on("close", () => {
-        clearServerHeartbeatWatchdog(ws);
-        clearServerActiveProbe(ws);
-        if (currentWs === ws) {
-          currentWs = null;
-          remoteMappingStatuses.clear();
-          failActiveRequests(ws, "server disconnected");
-          logger.warn("disconnected from server", { reconnectMs: config.reconnectMs });
-        } else {
-          logger.info("stale server connection closed");
-        }
-        resolve();
-      });
-      ws.on("error", (error) => {
-        if (currentWs === ws) {
-          lastError = error.message;
-          logger.error("connection error", { error: error.message });
-        } else {
-          logger.info("stale server connection error ignored", { error: error.message });
-        }
-        ws.close();
-      });
-      ws.once("close", () => {
-        if (ws.serverVerifiedAt && performance.now() - ws.serverVerifiedAt >= STABLE_CONNECTION_MS) skipNextReconnectDelay = true;
-        reconnectAttempt = ws.serverVerified ? 1 : reconnectAttempt + 1;
-      });
-    });
-
-    reconnectNow = null;
-    await waitBeforeReconnect();
-  }
-}
-
 function statusPayload(req) {
   reloadMappings();
   return {
@@ -739,23 +526,16 @@ function statusPayload(req) {
     user: currentUser(req, config) ? { username: config.adminUser } : null,
     config: publicConfig(),
     connected: isConnected(),
+    connectedAt,
+    transport: currentSocket?.connected ? currentSocket.io.engine.transport.name : "",
     lastError,
     reconnectAttempt,
-    reconnectDelayMs,
-    nextReconnectAt,
-    lastServerProbeAt,
-    lastServerProbeAckAt,
-    serverProbeLatencyMs,
     limits: {
       maxConcurrentRequests: config.maxConcurrentRequests,
       maxConcurrentRequestsPerMapping: config.maxConcurrentRequestsPerMapping,
       maxWsPayloadBytes: config.maxWsPayloadBytes,
-      maxReconnectDelayMs: config.maxReconnectDelayMs,
-      serverProbeIntervalMs: config.serverProbeIntervalMs,
-      serverProbeTimeoutMs: config.serverProbeTimeoutMs
+      maxReconnectDelayMs: config.maxReconnectDelayMs
     },
-    lastServerPingAt,
-    lastServerActivityAt: lastServerActivityAt ? new Date(lastServerActivityAt).toISOString() : "",
     mappings: config.mappings.map((mapping) => ({ ...mapping, status: mappingStatus(mapping), statusMessage: mappingStatusMessage(mapping), stats: updateRates(statsFor(mapping.id)) })),
     logs: logger.entries
   };

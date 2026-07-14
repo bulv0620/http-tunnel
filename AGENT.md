@@ -15,7 +15,7 @@ apps/client    Local tunnel client and admin API
 packages/shared Shared server/client utilities
 ```
 
-The server accepts public HTTP requests on mapped ports, forwards them through one WebSocket tunnel to the client, and the client streams the request to a local HTTP service. Responses are streamed back through the same tunnel.
+The server accepts public HTTP requests on mapped ports, forwards them through one Socket.IO tunnel (WebSocket transport only) to the client, and the client streams the request to a local HTTP service. Responses are streamed back through the same tunnel.
 
 The project intentionally supports only:
 
@@ -60,8 +60,6 @@ MAX_CONCURRENT_REQUESTS              256
 MAX_CONCURRENT_REQUESTS_PER_MAPPING  64
 MAX_WS_PAYLOAD_BYTES                 2097152
 MAX_HEADER_BYTES                     16384
-TUNNEL_PROBE_INTERVAL_MS              5000
-TUNNEL_PROBE_TIMEOUT_MS               10000
 MAX_RECONNECT_DELAY_MS                15000
 ```
 
@@ -185,9 +183,9 @@ The server still has backward-compatible fallback for `?token=...`.
 
 Server tunnel authentication is intentionally strict:
 
-- the server must be fully initialized before accepting tunnel WebSocket upgrades
+- the server must be fully initialized before accepting Socket.IO tunnel handshakes
 - the server tunnel token is required and cannot be empty
-- a bad tunnel token must fail the WebSocket upgrade with `401`
+- a bad tunnel token must fail the Socket.IO handshake with `401`
 - if one client is already connected, another client must be rejected instead of replacing it
 - when the server tunnel token changes, the existing tunnel connection must be closed so the client has to re-authenticate immediately
 
@@ -198,7 +196,7 @@ This protects the intended one-server-to-one-client model. Do not reintroduce be
 The transfer path is:
 
 ```text
-user -> server mapped port -> WebSocket tunnel -> client -> local HTTP service
+user -> server mapped port -> Socket.IO tunnel -> client -> local HTTP service
 ```
 
 The current implementation uses streaming instead of buffering full files in memory.
@@ -212,35 +210,28 @@ packages/shared/src/stream-protocol.js
 packages/shared/src/http-utils.js
 ```
 
-The WebSocket protocol uses JSON messages for request/response metadata and binary messages for body chunks. Binary messages have a compact prefix that identifies direction and request id.
+The Socket.IO protocol uses object events for request/response metadata and binary events for body chunks. Binary messages keep a compact prefix that identifies direction and request id.
 
-Protocol messages and frames validate the 32-hex-character request id. WebSocket payloads default to a 2 MiB maximum and compression is disabled. Do not remove these checks without replacing them with equivalent resource protection.
+Protocol messages and frames validate the 32-hex-character request id. Socket.IO payloads default to a 2 MiB maximum and compression is disabled. Do not remove these checks without replacing them with equivalent resource protection.
 
 `request-error` is also the cancellation message from the server to the client. When the public caller disconnects or a tunnel request times out, the client must destroy both the local `ClientRequest` and any active local response stream. If an error occurs after public response headers were sent, destroy the HTTP response instead of appending an error string to the response body; this makes truncation visible and avoids corrupting downloads.
 
-Backpressure is handled with:
+Backpressure is handled with per-event Socket.IO acknowledgements and:
 
 ```text
-sendWs()
-waitForWsBackpressure()
+sendTunnel()
 writeStream()
 ```
 
-from `packages/shared/src/stream-protocol.js`.
+from `packages/shared/src/tunnel-transport.js` and `packages/shared/src/stream-protocol.js`.
 
-Backpressure waiting has a 30-second ceiling. Stream writes resolve on `drain`, `close`, or `error` so a closed destination cannot leave an unresolved promise.
+Tunnel event acknowledgement has a 30-second ceiling. Stream writes resolve on `drain`, `close`, or `error` so a closed destination cannot leave an unresolved promise.
 
 ## Connection Recovery
 
-The server sends a WebSocket ping every 15 seconds for transport latency. A tunnel is stale after 75 seconds without valid end-to-end client liveness. Valid inbound application messages (including `heartbeat` and response body frames) refresh server liveness; control ping/pong frames do not, because a CDN/proxy may terminate and answer them itself. This also means an active transfer is not disconnected merely because a control-frame pong is delayed.
+Socket.IO/Engine.IO owns transport heartbeat and reconnect behavior. The client enables infinite reconnect attempts with exponential backoff and jitter. The base delay is the saved `reconnectMs`; `MAX_RECONNECT_DELAY_MS` defaults to 15 seconds. There is no custom application heartbeat, ping/pong watchdog, or hand-written reconnect loop.
 
-The client also sends an end-to-end JSON `heartbeat` probe every 5 seconds. The server must return `heartbeat-ack`; the client terminates the socket if no acknowledgement or other valid server message arrives within 10 seconds after the probe is written. This application-level probe is intentional for CDN/proxy paths where a stale client-to-edge WebSocket can outlive the edge-to-origin connection. Do not replace it with only WebSocket control ping/pong.
-
-New clients advertise `heartbeatVersion: 1` in `hello`, and new servers advertise it in `mapping-status`/`heartbeat-ack`. Before both sides negotiate this capability, the server lets pong refresh liveness and the client does not enforce the application-probe deadline, preserving rolling compatibility with older peers. After negotiation, only application messages refresh end-to-end liveness.
-
-Heartbeat freshness uses the monotonic clock. If the local event loop resumes after a long pause, the peer gets a short 10-second fresh-probe window instead of an immediate stale disconnect. Preserve this distinction between peer failure and a local process pause.
-
-The client reconnects forever. Reconnect delay starts at `reconnectMs`, uses exponential backoff with jitter, and defaults to a 15-second cap when the configured base is lower. Probe timeout and closure of a connection that was healthy for at least 30 seconds trigger one immediate reconnect; repeated setup/auth/connect failures still use backoff. A successful end-to-end verification or an explicit manual/config restart resets the retry state. Retry count, next retry time, end-to-end acknowledgement time, and probe latency are exposed by the client status API and dashboard.
+The tunnel still performs a business handshake: the client emits `hello` with its mappings and does not report the tunnel as verified until the server returns a valid tunnel event such as `mapping-status`. Every tunnel event uses a Socket.IO acknowledgement with a 30-second timeout to bound queued streaming data; this acknowledgement is flow control, not a liveness heartbeat.
 
 ## Timeout Semantics
 
@@ -270,7 +261,7 @@ This setting is not a tunnel file size limit. It applies to JSON/admin API reque
 
 Both sides independently enforce global and per-mapping active-request limits. Defaults are 256 globally and 64 per mapping. The server returns `503` before creating tunnel state when its limit is reached; the client returns a `response-error` if its independent limit is reached.
 
-HTTP header size defaults to 16 KiB and WebSocket payload size defaults to 2 MiB. Hop-by-hop headers, including names nominated by the `Connection` header, are removed. Header arrays remain arrays so multiple `Set-Cookie` response headers are preserved.
+HTTP header size defaults to 16 KiB and Socket.IO payload size defaults to 2 MiB. Hop-by-hop headers, including names nominated by the `Connection` header, are removed. Header arrays remain arrays so multiple `Set-Cookie` response headers are preserved.
 
 ## Observability
 
@@ -278,7 +269,7 @@ Implemented observability features:
 
 - persistent server audit logs in SQLite
 - client/server connection state
-- heartbeat and latency display
+- Socket.IO connection and transport display
 - mapping traffic counters
 - real-time rate display
 - active request count
@@ -411,4 +402,4 @@ The current tests cover CORS, proxy trust, login/session security, header forwar
 - There is no full automated end-to-end tunnel test yet; current automated coverage is at the shared security/protocol layer.
 - Docker behavior is not part of the automated test suite.
 - For public deployment behind Nginx or Cloudflare, upstream idle/read/send timeouts can still interrupt long uploads even though the app timeout is now idle-based.
-- WebSocket fallback token in query string remains for compatibility but header auth is preferred.
+- Socket.IO handshake fallback token in query string remains for compatibility but header auth is preferred.

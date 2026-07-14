@@ -47,12 +47,8 @@
           <strong>{{ formatTime(status.client?.connectedAt) }}</strong>
         </div>
         <div class="connection-item">
-          <span>{{ t("dashboard.latency") }}</span>
-          <strong>{{ status.client?.latencyMs ?? "-" }} ms</strong>
-        </div>
-        <div class="connection-item">
-          <span>{{ t("dashboard.lastHeartbeat") }}</span>
-          <strong>{{ formatTime(status.client?.lastPongAt) }}</strong>
+          <span>{{ t("dashboard.transport") }}</span>
+          <strong>{{ status.client?.transport || "-" }}</strong>
         </div>
       </div>
     </section>
@@ -80,12 +76,12 @@
           <strong>{{ status.config?.tunnelToken ? t("dashboard.tokenSet") : t("dashboard.tokenUnset") }}</strong>
         </div>
         <div class="connection-item">
-          <span>{{ t("dashboard.endToEndHeartbeat") }}</span>
-          <strong>{{ formatTime(status.lastServerProbeAckAt || status.lastServerPingAt) }}</strong>
+          <span>{{ t("dashboard.connectedAt") }}</span>
+          <strong>{{ formatTime(status.connectedAt) }}</strong>
         </div>
         <div class="connection-item">
-          <span>{{ t("dashboard.endToEndLatency") }}</span>
-          <strong>{{ status.serverProbeLatencyMs ?? "-" }} ms</strong>
+          <span>{{ t("dashboard.transport") }}</span>
+          <strong>{{ status.transport || "-" }}</strong>
         </div>
         <div class="connection-item">
           <span>{{ t("dashboard.reconnectMs") }}</span>
@@ -94,10 +90,6 @@
         <div class="connection-item">
           <span>{{ t("dashboard.reconnectAttempt") }}</span>
           <strong>{{ status.reconnectAttempt || 0 }}</strong>
-        </div>
-        <div class="connection-item">
-          <span>{{ t("dashboard.nextReconnectAt") }}</span>
-          <strong>{{ formatTime(status.nextReconnectAt) }}</strong>
         </div>
         <div class="connection-item">
           <span>{{ t("dashboard.requestTimeoutMs") }}</span>
