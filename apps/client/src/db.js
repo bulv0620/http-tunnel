@@ -38,11 +38,17 @@ db.exec(`
     server_port INTEGER NOT NULL,
     client_host TEXT NOT NULL,
     client_port INTEGER NOT NULL,
+    access_mode TEXT NOT NULL DEFAULT 'direct',
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 `);
+
+const mappingColumns = db.prepare("PRAGMA table_info(mappings)").all();
+if (!mappingColumns.some((column) => column.name === "access_mode")) {
+  db.exec("ALTER TABLE mappings ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'direct'");
+}
 
 const readAll = db.prepare("SELECT key, value FROM settings");
 const upsert = db.prepare(`
@@ -51,13 +57,14 @@ const upsert = db.prepare(`
   ON CONFLICT(key) DO UPDATE SET value = excluded.value
 `);
 const readMappings = db.prepare(`
-  SELECT id, name, server_port AS serverPort, client_host AS clientHost, client_port AS clientPort, enabled
+  SELECT id, name, server_port AS serverPort, client_host AS clientHost, client_port AS clientPort,
+         access_mode AS accessMode, enabled
   FROM mappings
   ORDER BY created_at ASC
 `);
 const insertMapping = db.prepare(`
-  INSERT INTO mappings (id, name, server_port, client_host, client_port, enabled)
-  VALUES (@id, @name, @serverPort, @clientHost, @clientPort, @enabled)
+  INSERT INTO mappings (id, name, server_port, client_host, client_port, access_mode, enabled)
+  VALUES (@id, @name, @serverPort, @clientHost, @clientPort, @accessMode, @enabled)
 `);
 const updateMappingRow = db.prepare(`
   UPDATE mappings
@@ -65,6 +72,7 @@ const updateMappingRow = db.prepare(`
       server_port = @serverPort,
       client_host = @clientHost,
       client_port = @clientPort,
+      access_mode = @accessMode,
       enabled = @enabled,
       updated_at = CURRENT_TIMESTAMP
   WHERE id = @id

@@ -122,6 +122,7 @@
         <el-table-column :label="t('dashboard.mapping')" min-width="240">
           <template #default="{ row }">
             <div class="mapping-name">{{ row.name || "-" }}</div>
+            <div class="mapping-access-mode">{{ accessModeText(row.accessMode) }}</div>
             <div class="mapping-route">
               :{{ row.serverPort }} <span>-></span> {{ row.clientHost }}:{{ row.clientPort }}
             </div>
@@ -216,6 +217,17 @@
           <el-form-item :label="t('dashboard.serverPort')"><el-input-number v-model="mappingForm.serverPort" :min="1" class="full-input" /></el-form-item>
           <el-form-item :label="t('dashboard.clientHost')"><el-input v-model="mappingForm.clientHost" /></el-form-item>
           <el-form-item :label="t('dashboard.clientPort')"><el-input-number v-model="mappingForm.clientPort" :min="1" class="full-input" /></el-form-item>
+          <el-form-item class="span-2" :label="t('dashboard.accessMode')">
+            <div class="access-mode-control">
+              <el-radio-group v-model="mappingForm.accessMode" class="access-mode-options">
+                <el-radio-button value="direct">{{ t("dashboard.directAccess") }}</el-radio-button>
+                <el-radio-button value="reverse-proxy">{{ t("dashboard.reverseProxyAccess") }}</el-radio-button>
+              </el-radio-group>
+              <p class="form-help">
+                {{ mappingForm.accessMode === "reverse-proxy" ? t("dashboard.reverseProxyAccessHelp") : t("dashboard.directAccessHelp") }}
+              </p>
+            </div>
+          </el-form-item>
           <el-form-item :label="t('dashboard.enable')"><el-switch v-model="mappingForm.enabled" /></el-form-item>
         </div>
       </el-form>
@@ -250,7 +262,7 @@ const mappingVisible = ref(false);
 const editingId = ref("");
 const mappingDialogSaving = ref(false);
 const savingMappingIds = ref(new Set());
-const mappingForm = reactive({ name: "", serverPort: 2234, clientHost: "127.0.0.1", clientPort: 1234, enabled: true });
+const mappingForm = reactive({ name: "", serverPort: 2234, clientHost: "127.0.0.1", clientPort: 1234, accessMode: "direct", enabled: true });
 
 const title = computed(() => (props.mode === "server" ? t("dashboard.serverTitle") : t("dashboard.clientTitle")));
 const subtitle = computed(() => (props.mode === "server" ? t("dashboard.serverSubtitle") : t("dashboard.clientSubtitle")));
@@ -320,6 +332,10 @@ function statusClass(value) {
   return "offline";
 }
 
+function accessModeText(value) {
+  return value === "reverse-proxy" ? t("dashboard.reverseProxyAccess") : t("dashboard.directAccess");
+}
+
 function isMappingSaving(id) {
   return savingMappingIds.value.has(id);
 }
@@ -341,13 +357,13 @@ function syncAutoRefresh() {
 
 function openCreate() {
   editingId.value = "";
-  Object.assign(mappingForm, { name: t("dashboard.webDefaultName"), serverPort: 2234, clientHost: "127.0.0.1", clientPort: 1234, enabled: true });
+  Object.assign(mappingForm, { name: t("dashboard.webDefaultName"), serverPort: 2234, clientHost: "127.0.0.1", clientPort: 1234, accessMode: "direct", enabled: true });
   mappingVisible.value = true;
 }
 
 function openEdit(row) {
   editingId.value = row.id;
-  Object.assign(mappingForm, row);
+  Object.assign(mappingForm, row, { accessMode: row.accessMode || "direct" });
   mappingVisible.value = true;
 }
 

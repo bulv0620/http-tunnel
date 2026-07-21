@@ -14,7 +14,7 @@ packages/shared  server/client 共享代码
 ## 架构
 
 ```text
-用户请求服务端映射端口
+用户请求服务端映射端口（公网直连或经本机反向代理）
   -> apps/server
     -> Socket.IO（WebSocket transport）流式传输
       -> apps/client
@@ -73,6 +73,27 @@ apps/client/db/client.sqlite
 ```
 
 第一次运行时数据库会自动创建。服务端访问 `http://<ip>:12400`，客户端访问 `http://<ip>:12500`，页面会进入初始化配置。
+
+## 映射访问方式
+
+在客户端管理页新增或编辑映射时，可以选择服务端映射端口的访问方式：
+
+- **公网 IP + 端口**：沿用原有行为，映射端口监听服务端配置的 `HOST`。未选择访问方式、旧版本创建的映射也默认使用此模式。
+- **反向代理**：映射端口只监听 `127.0.0.1`，再由同一台主机上的 Nginx、Caddy 等反向代理转发到 `127.0.0.1:<映射端口>`，避免直接通过公网 IP 和端口访问。
+
+例如映射端口为 `2234` 时，Nginx 可以将站点转发到：
+
+```nginx
+location / {
+  proxy_pass http://127.0.0.1:2234;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+反向代理模式要求代理与服务端进程共享网络命名空间。它适用于 PM2/直接运行，或服务端使用 host 网络的 Docker 部署；bridge 容器中的 `127.0.0.1` 仅在容器内部可达。
 
 ## 本地运行
 
@@ -231,6 +252,8 @@ Tunnel Token：一串 32 位以上随机字符串
 `请求超时 ms` 是隧道请求的空闲超时，不是总耗时。上传或下载过程中只要持续有数据流动，就会自动刷新计时；只有超过这个时间没有任何请求/响应数据流动，才会断开。
 
 服务端推荐 host 网络，是因为服务端映射端口是动态创建的。host 网络下，客户端管理页里新增的服务器端口会直接监听在 VPS 宿主机上，不需要每新增一个端口就改 Docker 端口映射。
+
+选择“反向代理”访问方式时，映射端口只绑定宿主机 `127.0.0.1`，可直接供宿主机上的 Nginx/Caddy 使用，也不会在公网网卡上监听。
 
 ### 服务端使用 bridge 网络
 

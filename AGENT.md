@@ -78,6 +78,15 @@ These files are ignored by git.
 
 The app creates the `db` directories automatically on startup.
 
+Client mappings are stored in the `mappings` table. Each mapping has an `access_mode` column with these persisted values:
+
+```text
+direct
+reverse-proxy
+```
+
+`apps/client/src/db.js` migrates existing databases by adding `access_mode TEXT NOT NULL DEFAULT 'direct'` when the column is missing. Keep this migration and default so mappings created before access modes existed retain their original public-listener behavior.
+
 All provided Docker compose files bind-mount the corresponding host DB directory:
 
 ```text
@@ -143,6 +152,8 @@ When adding or changing user-facing frontend text, update both locale dictionari
 
 The frontend visual system is mostly centralized in `apps/web/src/style.css`. It uses a responsive control-center style with sticky top navigation, metric cards, connection summaries, status pills, compact log lists, and responsive tables. Prefer extending the existing classes and CSS variables over adding one-off component styling.
 
+The client mapping dialog in `apps/web/src/views/DashboardView.vue` lets users choose between direct access and reverse-proxy access. It must always present a clear default and helper text; an absent `accessMode` is displayed and submitted as `direct` for backward compatibility.
+
 ## Auth And Setup
 
 Both server and client keep login.
@@ -196,7 +207,7 @@ This protects the intended one-server-to-one-client model. Do not reintroduce be
 The transfer path is:
 
 ```text
-user -> server mapped port -> Socket.IO tunnel -> client -> local HTTP service
+user -> server mapped port (directly or through a local reverse proxy) -> Socket.IO tunnel -> client -> local HTTP service
 ```
 
 The current implementation uses streaming instead of buffering full files in memory.
@@ -209,6 +220,21 @@ apps/client/src/index.js
 packages/shared/src/stream-protocol.js
 packages/shared/src/http-utils.js
 ```
+
+## Mapping Access Modes
+
+Mapping access mode is client-controlled, persisted in client SQLite, sent in the `hello`/`mappings` tunnel control payload, and normalized again by the server.
+
+Supported values and server behavior:
+
+```text
+direct         listen on the configured server HOST (legacy behavior)
+reverse-proxy  listen only on 127.0.0.1
+```
+
+The canonical constants and normalization helpers live in `packages/shared/src/mappings.js`. Missing or unknown access-mode values normalize to `direct` so old clients and saved mappings remain compatible. The client admin API separately rejects explicitly unsupported non-empty values.
+
+Do not change `reverse-proxy` to listen on `0.0.0.0`; its purpose is to prevent the mapped port from being reachable through the server's public interfaces. Nginx, Caddy, or another proxy on the same network namespace should forward to `127.0.0.1:<serverPort>`.
 
 The Socket.IO protocol uses object events for request/response metadata and binary events for body chunks. Binary messages keep a compact prefix that identifies direction and request id.
 
@@ -306,9 +332,12 @@ docker compose -f deploy/docker/compose.client-host.yml up -d --build
 Host network mode is preferred for:
 
 - server dynamic mapped ports
+- server reverse-proxy mappings consumed by Nginx/Caddy on the host
 - client access to services running on the client host
 
 Bridge mode exists, but server mapped ports must be manually exposed in `compose.server-bridge.yml`.
+
+Reverse-proxy mappings bind to the server process's `127.0.0.1`. With Docker bridge networking, that loopback belongs to the container and is not reachable from a proxy on the host or in another container. Use PM2/direct execution or server host networking when the host reverse proxy needs to consume a `reverse-proxy` mapping.
 
 Docker images copy project files into `/app`. The container does not live-sync with the host project directory. After code changes, rebuild:
 
@@ -383,7 +412,7 @@ Shared security/protocol tests:
 npm test
 ```
 
-The current tests cover CORS, proxy trust, login/session security, header forwarding, protocol validation, backpressure, and closed-stream behavior.
+The current tests cover CORS, proxy trust, login/session security, header forwarding, mapping access-mode defaults/listen hosts, protocol validation, backpressure, and closed-stream behavior.
 
 ## Important Design Decisions
 
@@ -392,6 +421,7 @@ The current tests cover CORS, proxy trust, login/session security, header forwar
 - Keep the current Vue/Element Plus control-center UI style consistent. Prefer shared classes in `apps/web/src/style.css` over scattered per-view styling.
 - Keep business settings in SQLite. Runtime-only security and resource controls belong in environment variables and should use `packages/shared/src/runtime-config.js` validation.
 - Server dashboard must not edit mappings. Mappings are controlled by the client.
+- Keep mapping access-mode compatibility: missing values default to `direct`, while `reverse-proxy` binds only to `127.0.0.1`.
 - Client should not attempt to connect to the server before first-run setup is complete.
 - Server tunnel access must remain authenticated and one-to-one. Reject extra clients; do not auto-replace the connected client.
 - Docker DB bind mounts are intentional. Do not remove persistence or delete host DB state during routine rebuilds.

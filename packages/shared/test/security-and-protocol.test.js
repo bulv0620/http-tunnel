@@ -6,6 +6,12 @@ import { clientIp } from "../src/audit.js";
 import { clearSessions, createLoginRateLimiter, currentUser, login } from "../src/auth.js";
 import { applyCors } from "../src/cors.js";
 import { toHeaderObject } from "../src/http-utils.js";
+import {
+  MAPPING_ACCESS_MODE,
+  isMappingAccessMode,
+  mappingListenHost,
+  normalizeMappings
+} from "../src/mappings.js";
 import { hashPassword } from "../src/password.js";
 import {
   FRAME,
@@ -98,6 +104,17 @@ test("header forwarding removes connection-nominated headers and preserves cooki
     "set-cookie": ["a=1; Path=/", "b=2; Path=/"],
     "content-type": "text/plain"
   });
+});
+
+test("mapping access mode defaults to direct and reverse proxy binds to loopback", () => {
+  const [legacyMapping] = normalizeMappings([{ serverPort: 8080, clientPort: 3000 }]);
+  const [proxyMapping] = normalizeMappings([{ serverPort: 8081, clientPort: 3001, accessMode: "reverse-proxy" }]);
+
+  assert.equal(legacyMapping.accessMode, MAPPING_ACCESS_MODE.DIRECT);
+  assert.equal(mappingListenHost(legacyMapping, "0.0.0.0"), "0.0.0.0");
+  assert.equal(proxyMapping.accessMode, MAPPING_ACCESS_MODE.REVERSE_PROXY);
+  assert.equal(mappingListenHost(proxyMapping, "0.0.0.0"), "127.0.0.1");
+  assert.equal(isMappingAccessMode("unsupported"), false);
 });
 
 test("stream frames validate request ids and frame types", () => {

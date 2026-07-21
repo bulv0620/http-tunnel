@@ -16,7 +16,7 @@ import {
 } from "./db.js";
 import { json, readJson, toHeaderObject } from "@http-tunnel/shared/http-utils";
 import { createLogger } from "@http-tunnel/shared/logger";
-import { mappingTarget } from "@http-tunnel/shared/mappings";
+import { MAPPING_ACCESS_MODE, isMappingAccessMode, mappingTarget } from "@http-tunnel/shared/mappings";
 import { hashPassword } from "@http-tunnel/shared/password";
 import { envBoolean, envList, envPositiveInteger } from "@http-tunnel/shared/runtime-config";
 import { serveStaticWeb } from "@http-tunnel/shared/static-web";
@@ -202,15 +202,18 @@ function remoteServerPort() {
 function validateMappingInput(body, currentId = "") {
   const serverPort = validatePort(body.serverPort, "serverPort");
   const clientPort = validatePort(body.clientPort, "clientPort");
+  const accessMode = body.accessMode || MAPPING_ACCESS_MODE.DIRECT;
   const duplicate = config.mappings.find((mapping) => mapping.serverPort === serverPort && mapping.id !== currentId);
   if (duplicate) throw new Error(`serverPort ${serverPort} is already used by ${duplicate.name}`);
   if (serverPort === remoteServerPort()) throw new Error("serverPort cannot equal the server management port");
   if (clientPort === listenConfig.adminPort) throw new Error("clientPort cannot expose the client management port");
+  if (!isMappingAccessMode(accessMode)) throw new Error("accessMode must be direct or reverse-proxy");
   return {
     name: String(body.name || "mapping").trim() || "mapping",
     serverPort,
     clientHost: String(body.clientHost || "127.0.0.1").trim(),
     clientPort,
+    accessMode,
     enabled: body.enabled !== false
   };
 }

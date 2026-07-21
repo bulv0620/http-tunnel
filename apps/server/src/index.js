@@ -8,7 +8,7 @@ import { applyCors } from "@http-tunnel/shared/cors";
 import { addAuditLog, isConfigured, listAuditLogs, loadSettings, saveSettings } from "./db.js";
 import { json, readJson, toHeaderObject } from "@http-tunnel/shared/http-utils";
 import { createLogger } from "@http-tunnel/shared/logger";
-import { normalizeMappings } from "@http-tunnel/shared/mappings";
+import { mappingListenHost, normalizeMappings } from "@http-tunnel/shared/mappings";
 import { hashPassword } from "@http-tunnel/shared/password";
 import { envBoolean, envList, envPositiveInteger } from "@http-tunnel/shared/runtime-config";
 import { serveStaticWeb } from "@http-tunnel/shared/static-web";
@@ -132,21 +132,24 @@ function stopRemovedMappings(nextMappings) {
 
 function startMapping(mapping) {
   if (!mapping.enabled || mappingServers.has(mapping.id)) return;
+  const listenHost = mappingListenHost(mapping, config.host);
   const server = http.createServer({ maxHeaderSize: config.maxHeaderBytes }, (req, res) => handleMappedRequest(mapping, req, res));
   mappingListenErrors.delete(mapping.id);
   server.on("error", (error) => {
     mappingListenErrors.set(mapping.id, error.message);
     logger.error("mapping listen failed", {
       id: mapping.id,
+      listenHost,
       serverPort: mapping.serverPort,
       error: error.message
     });
     void sendMappingStatus();
   });
-  server.listen(mapping.serverPort, config.host, () => {
+  server.listen(mapping.serverPort, listenHost, () => {
     mappingListenErrors.delete(mapping.id);
     logger.info("mapping listening", {
       id: mapping.id,
+      listenHost,
       serverPort: mapping.serverPort,
       clientHost: mapping.clientHost,
       clientPort: mapping.clientPort

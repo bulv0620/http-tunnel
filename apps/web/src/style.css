@@ -837,6 +837,21 @@ select {
   overflow-wrap: anywhere;
 }
 
+.mapping-access-mode {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  margin-top: 5px;
+  padding: 0 8px;
+  border: 1px solid rgba(0, 122, 255, 0.18);
+  border-radius: 999px;
+  color: #075fae;
+  background: rgba(0, 122, 255, 0.07);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
 .mapping-route {
   display: flex;
   align-items: center;
@@ -860,6 +875,32 @@ select {
   font-size: 12px;
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+
+.access-mode-control {
+  width: 100%;
+}
+
+.access-mode-options {
+  display: flex;
+  width: 100%;
+}
+
+.access-mode-options .el-radio-button {
+  flex: 1;
+}
+
+.access-mode-options .el-radio-button__inner {
+  width: 100%;
+  min-height: 44px;
+  padding-block: 12px;
+}
+
+.form-help {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .table-number,
