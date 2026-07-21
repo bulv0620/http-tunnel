@@ -930,6 +930,7 @@ select {
   padding: 0 14px;
   border: 0 !important;
   border-radius: 10px !important;
+  outline: none !important;
   color: #5f6673;
   background: transparent !important;
   box-shadow: none !important;
@@ -957,9 +958,12 @@ select {
 .access-mode-options .el-radio-button__original-radio:focus-visible + .el-radio-button__inner {
   border: 0 !important;
   border-radius: 10px;
-  outline: 2px solid rgba(0, 122, 255, 0.72);
-  outline-offset: -2px;
+  outline: none !important;
   box-shadow: none !important;
+}
+
+.access-mode-options:has(.el-radio-button__original-radio:focus-visible) {
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.18), 0 1px 2px rgba(15, 23, 42, 0.04) inset;
 }
 
 .form-help {
