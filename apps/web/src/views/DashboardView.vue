@@ -219,7 +219,12 @@
           <el-form-item :label="t('dashboard.clientPort')"><el-input-number v-model="mappingForm.clientPort" :min="1" class="full-input" /></el-form-item>
           <el-form-item class="span-2" :label="t('dashboard.accessMode')">
             <div class="access-mode-control">
-              <el-radio-group v-model="mappingForm.accessMode" class="access-mode-options">
+              <el-radio-group
+                v-model="mappingForm.accessMode"
+                class="access-mode-options"
+                :class="{ 'is-reverse-proxy': mappingForm.accessMode === 'reverse-proxy' }"
+                :aria-label="t('dashboard.accessMode')"
+              >
                 <el-radio-button value="direct">{{ t("dashboard.directAccess") }}</el-radio-button>
                 <el-radio-button value="reverse-proxy">{{ t("dashboard.reverseProxyAccess") }}</el-radio-button>
               </el-radio-group>
